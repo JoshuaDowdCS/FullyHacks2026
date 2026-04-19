@@ -83,6 +83,7 @@ def _compute_relevance(model_info: dict, query_terms: list[str]) -> float:
       +3.0  exact word in project name
       +2.5  term appears in class list
       +2.0  substring in project name
+      +1.5/N focus bonus (N = number of classes; single-purpose models score higher)
       +1.0  substring in description or tags
       +0.5  popularity tier bonus (>1 000 images)
       +0.5  extra popularity tier (>5 000 images)
@@ -109,6 +110,11 @@ def _compute_relevance(model_info: dict, query_terms: list[str]) -> float:
             score += 1.0
         if t in tags:
             score += 1.0
+
+    # Focus bonus: single-purpose models are generally more accurate
+    classes_list = model_info.get("classes") or []
+    num_classes = len(classes_list) if classes_list else 1
+    score += 1.5 / num_classes  # +1.5 for 1 class, +0.75 for 2, etc.
 
     # Popularity tie-breaker
     images = model_info.get("images") or model_info.get("image_count") or 0
@@ -227,19 +233,20 @@ def _extract_project_id(result: dict) -> str:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def discover_model(
+def discover_models(
     query: str,
     api_key: str,
     min_relevance: float = 1.0,
-) -> DiscoveredModel | None:
-    """Discover the best object-detection model for *query*.
+    max_candidates: int = 5,
+) -> list[DiscoveredModel]:
+    """Discover the best object-detection models for *query*.
 
-    Returns ``None`` when no suitable model is found (→ Gemini-only batch).
+    Returns a ranked list (best first). Empty when nothing passes filters.
     """
     raw_results = search_models(query, api_key)
     if not raw_results:
         logger.warning("No models found for query: %r", query)
-        return None
+        return []
 
     query_terms = normalize_query(query).split()
     candidates: list[DiscoveredModel] = []
@@ -284,25 +291,23 @@ def discover_model(
 
     if not candidates:
         logger.warning("No object-detection models passed hard filters")
-        return None
+        return []
 
     candidates.sort(key=lambda m: m.relevance_score, reverse=True)
-    best = candidates[0]
 
-    if best.relevance_score < min_relevance:
+    if candidates[0].relevance_score < min_relevance:
         logger.warning(
             "Best model %s scored %.1f (below min %.1f) — Gemini-only fallback",
-            best.model_id,
-            best.relevance_score,
+            candidates[0].model_id,
+            candidates[0].relevance_score,
             min_relevance,
         )
-        return None
+        return []
 
-    logger.info(
-        "Selected model: %s  name=%s  score=%.1f  classes=%s",
-        best.model_id,
-        best.name,
-        best.relevance_score,
-        best.classes[:5],
-    )
-    return best
+    top = candidates[:max_candidates]
+    for m in top:
+        logger.info(
+            "Candidate model: %s  name=%s  score=%.1f  classes=%s",
+            m.model_id, m.name, m.relevance_score, m.classes[:5],
+        )
+    return top

@@ -21,9 +21,6 @@ class PipelineConfig:
     roboflow_api_key: str = field(
         default_factory=lambda: os.environ.get("ROBOFLOW_API_KEY", "")
     )
-    gemini_base_url: str = field(
-        default_factory=lambda: os.environ.get("GEMINI_BASE_URL", "")
-    )
     gemini_api_key: str = field(
         default_factory=lambda: os.environ.get("GEMINI_API_KEY", "")
     )
@@ -36,7 +33,7 @@ class PipelineConfig:
 
     @property
     def gemini_configured(self) -> bool:
-        return bool(self.gemini_base_url)
+        return bool(self.gemini_api_key)
 
     @property
     def roboflow_configured(self) -> bool:

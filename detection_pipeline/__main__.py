@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .config import PipelineConfig
 from .pipeline import run_pipeline
+from .yolo import write_label_file
 
 
 def main() -> None:
@@ -67,8 +68,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
         datefmt="%H:%M:%S",
     )
-    # Mute noisy version-upgrade nag from the inference SDK
+    # Mute noisy third-party loggers
     logging.getLogger("inference").setLevel(logging.ERROR)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
 
     # Derive upload project name from prompt
     upload_project = ""
@@ -92,11 +95,20 @@ def main() -> None:
     if not config.roboflow_configured and not config.gemini_configured:
         parser.error(
             "At least one backend must be configured.\n"
-            "Set ROBOFLOW_API_KEY and/or GEMINI_BASE_URL environment variables."
+            "Set ROBOFLOW_API_KEY and/or GEMINI_API_KEY environment variables."
         )
 
     try:
-        stats = run_pipeline(config)
+        stats, results = run_pipeline(config)
+
+        # CLI mode: write labels to disk so upload can find them
+        config.labels_dir.mkdir(parents=True, exist_ok=True)
+        for result in results:
+            if result.boxes and not result.not_found:
+                label_path = config.labels_dir / f"{result.image_path.stem}.txt"
+                write_label_file(label_path, result.boxes)
+            elif result.not_found:
+                result.image_path.unlink(missing_ok=True)
 
         if config.upload_project and stats.labeled > 0:
             from .upload import upload_to_roboflow
