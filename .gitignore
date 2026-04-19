@@ -16,10 +16,13 @@ __pycache__/
 .cache/
 dataset/
 .superpowers/
+models/
 
 # Downloaded data
 images/
 frames/
+unclean_images/
+.scraper_staging/
 
 # Frontend
 ui/node_modules/

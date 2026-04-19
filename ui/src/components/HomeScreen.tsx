@@ -1,18 +1,33 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
+import type { ImageSource } from "../api";
+
+type SourceType = "existing" | "web" | "youtube";
 
 interface HomeScreenProps {
-  onLaunch: (prompt: string, confThreshold: number) => void;
+  onLaunch: (prompt: string, confThreshold: number, source: ImageSource) => void;
 }
 
 export default function HomeScreen({ onLaunch }: HomeScreenProps) {
   const [prompt, setPrompt] = useState("");
   const [confThreshold, setConfThreshold] = useState(0.7);
+  const [sourceType, setSourceType] = useState<SourceType>("web");
+  const [imageCount, setImageCount] = useState(200);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim()) return;
-    onLaunch(prompt.trim(), confThreshold);
+    let source: ImageSource;
+    if (sourceType === "web") {
+      source = { type: "web", count: imageCount };
+    } else if (sourceType === "youtube") {
+      if (!youtubeUrl.trim()) return;
+      source = { type: "youtube", url: youtubeUrl.trim(), maxVideos: 5 };
+    } else {
+      source = { type: "existing" };
+    }
+    onLaunch(prompt.trim(), confThreshold, source);
   };
 
   return (
@@ -124,11 +139,77 @@ export default function HomeScreen({ onLaunch }: HomeScreenProps) {
           </div>
         </div>
 
+        {/* Image source selector */}
+        <div className="mt-7">
+          <label className="block font-mono text-[9px] text-text-dim tracking-[0.12em] uppercase mb-2">
+            Image Source
+          </label>
+          <div className="flex gap-1 p-1 rounded-xl" style={{ background: "rgba(2,8,16,0.5)" }}>
+            {([
+              { key: "web" as SourceType, label: "Search Web" },
+              { key: "youtube" as SourceType, label: "YouTube" },
+              { key: "existing" as SourceType, label: "Existing" },
+            ]).map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setSourceType(key)}
+                className="flex-1 py-2 rounded-lg font-mono text-[10px] tracking-[0.08em] uppercase transition-all"
+                style={{
+                  background: sourceType === key ? "rgba(76,224,210,0.15)" : "transparent",
+                  border: sourceType === key ? "1px solid rgba(76,224,210,0.3)" : "1px solid transparent",
+                  color: sourceType === key ? "#4CE0D2" : "rgba(255,255,255,0.35)",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Source-specific options */}
+          {sourceType === "web" && (
+            <div className="mt-3 flex items-center gap-3">
+              <span className="font-mono text-[9px] text-text-dim tracking-[0.08em] uppercase whitespace-nowrap">
+                Target count
+              </span>
+              <input
+                type="number"
+                min={10}
+                max={1000}
+                step={10}
+                value={imageCount}
+                onChange={(e) => setImageCount(parseInt(e.target.value) || 200)}
+                className="w-20 rounded-lg px-3 py-2 font-mono text-sm text-text-primary outline-none"
+                style={{
+                  background: "rgba(2,8,16,0.7)",
+                  border: "1.5px solid rgba(76,224,210,0.15)",
+                }}
+              />
+            </div>
+          )}
+
+          {sourceType === "youtube" && (
+            <div className="mt-3">
+              <input
+                type="text"
+                value={youtubeUrl}
+                onChange={(e) => setYoutubeUrl(e.target.value)}
+                placeholder="YouTube URL (or leave blank to search)"
+                className="w-full rounded-lg px-3 py-2 font-mono text-sm text-text-primary outline-none"
+                style={{
+                  background: "rgba(2,8,16,0.7)",
+                  border: "1.5px solid rgba(76,224,210,0.15)",
+                }}
+              />
+            </div>
+          )}
+        </div>
+
         {/* Launch button */}
         <div className="mt-9 text-center">
           <motion.button
             type="submit"
-            disabled={!prompt.trim()}
+            disabled={!prompt.trim() || (sourceType === "youtube" && !youtubeUrl.trim())}
             className="relative inline-flex items-center px-10 py-[15px] font-mono text-[13px] font-semibold tracking-[0.15em] uppercase text-abyss bg-bio-cyan rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             style={{
               boxShadow: "0 0 30px rgba(76,224,210,0.3), 0 4px 20px rgba(0,0,0,0.3)",
@@ -136,7 +217,7 @@ export default function HomeScreen({ onLaunch }: HomeScreenProps) {
             whileHover={prompt.trim() ? { scale: 1.03, y: -2 } : {}}
             whileTap={prompt.trim() ? { scale: 0.97 } : {}}
           >
-            Launch Pipeline
+            {sourceType === "web" ? "Search & Label" : sourceType === "youtube" ? "Extract & Label" : "Launch Pipeline"}
             {/* Sonar pulse on button */}
             <span
               className="absolute inset-[-4px] rounded-[16px] pointer-events-none"

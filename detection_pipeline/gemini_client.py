@@ -97,12 +97,23 @@ class GeminiClient:
     # Per-image labeling
     # ------------------------------------------------------------------
 
+    _MAX_GEMINI_PX = 1024
+
     def label_image(self, image_path: Path, prompt: str) -> GeminiOutcome:
         """Send *image_path* to Gemini and return the parsed outcome."""
         try:
             image = Image.open(image_path)
         except IOError as exc:
             return GeminiOutcome(error=f"Cannot read image: {exc}")
+
+        # Downscale large images to reduce upload time; Gemini's 0-1000
+        # coordinate system is resolution-independent so quality is unaffected.
+        w, h = image.size
+        if max(w, h) > self._MAX_GEMINI_PX:
+            scale = self._MAX_GEMINI_PX / max(w, h)
+            image = image.resize(
+                (int(w * scale), int(h * scale)), Image.LANCZOS,
+            )
 
         label_prompt = LABEL_PROMPT_TEMPLATE.format(item=prompt)
 
@@ -126,11 +137,12 @@ class GeminiClient:
         self,
         image_paths: list[Path],
         prompt: str,
-        max_workers: int = 120,
+        max_workers: int = 10,
         on_result: "Callable[[int, int, Path, GeminiOutcome], None] | None" = None,
     ) -> dict[Path, GeminiOutcome]:
         """Send multiple images to Gemini concurrently using a thread pool.
 
+        *max_workers* defaults to 10 to stay within typical API rate limits.
         *on_result*, when provided, is called after each image with
         ``(done_count, total, path, outcome)``.
         """

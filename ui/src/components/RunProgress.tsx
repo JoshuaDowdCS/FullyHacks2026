@@ -12,23 +12,34 @@ const STEP_LABELS: Record<string, string> = {
   inference: "PROCESSING IMAGES",
   done: "COMPLETE",
   error: "ERROR",
+  // Acquisition steps
+  bootstrap: "BOOTSTRAPPING TOPIC",
+  crawling: "CRAWLING IMAGES",
+  dedup: "DEDUPLICATING",
+  filtering: "FILTERING IMAGES",
+  searching: "SEARCHING YOUTUBE",
+  scoring: "SCORING VIDEOS",
+  downloading: "DOWNLOADING VIDEOS",
+  extracting: "EXTRACTING FRAMES",
 };
 
 const STEP_DETAILS: Record<string, string> = {
   discovery: "Searching Roboflow for a matching model...",
   download: "Downloading model artifacts...",
   done: "Pipeline complete",
+  bootstrap: "Analyzing topic with Gemini...",
 };
 
 export default function RunProgress({ event, confThreshold }: RunProgressProps) {
   const step = event?.step ?? "discovery";
   const label = STEP_LABELS[step] ?? step.toUpperCase();
-  const isIndeterminate = step === "discovery" || step === "download";
-  const progress = event?.step === "inference" && event.total
-    ? (event.current! / event.total) * 100
+  const isIndeterminate = step === "discovery" || step === "download" || step === "bootstrap" || step === "dedup";
+  const hasProgress = event?.current != null && event?.total;
+  const progress = hasProgress
+    ? (event.current! / event.total!) * 100
     : step === "done" ? 100 : 0;
-  const detail = step === "inference" && event?.current != null
-    ? `Processing image ${event.current} of ${event.total}`
+  const detail = hasProgress
+    ? `${event.current} of ${event.total}`
     : STEP_DETAILS[step] ?? event?.message ?? "";
 
   return (
