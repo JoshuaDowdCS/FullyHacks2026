@@ -5,6 +5,8 @@ interface ActionButtonsProps {
   onDiscard: () => void;
   onRestart: () => void;
   onKeep: () => void;
+  onUndo: () => void;
+  canUndo: boolean;
 }
 
 function Anglerfish() {
@@ -66,7 +68,7 @@ function SeaTurtle() {
   );
 }
 
-export default function ActionButtons({ onDiscard, onRestart, onKeep }: ActionButtonsProps) {
+export default function ActionButtons({ onDiscard, onRestart, onKeep, onUndo, canUndo }: ActionButtonsProps) {
   return (
     <div className="fixed bottom-20 left-1/2 -translate-x-1/2 flex items-center gap-16 z-20">
       <motion.button
@@ -112,6 +114,36 @@ export default function ActionButtons({ onDiscard, onRestart, onKeep }: ActionBu
             textShadow: "0 0 12px rgba(59,139,245,0.5)",
           }}>
           +0.05
+        </span>
+      </motion.button>
+
+      <motion.button
+        onClick={onUndo}
+        disabled={!canUndo}
+        className="flex flex-col items-center gap-3 cursor-pointer bg-transparent border-none disabled:opacity-30 disabled:cursor-default"
+        whileHover={canUndo ? { scale: 1.12, y: -6 } : {}}
+        whileTap={canUndo ? { scale: 0.95 } : {}}
+      >
+        <div className="h-[56px] flex items-center justify-center">
+          <div className="w-11 h-11 rounded-full flex items-center justify-center"
+            style={{
+              border: "2px solid rgba(200,221,232,0.3)",
+              background: "rgba(6,18,34,0.6)",
+              boxShadow: "0 0 16px rgba(200,221,232,0.08)",
+            }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <path d="M9 14L4 9l5-5" stroke="#C8DDE8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" stroke="#C8DDE8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+        </div>
+        <span className="font-mono text-sm tracking-[0.15em] uppercase font-semibold px-3 py-1 rounded-full"
+          style={{
+            color: "#C8DDE8",
+            background: "rgba(200,221,232,0.08)",
+            border: "1px solid rgba(200,221,232,0.15)",
+          }}>
+          Undo
         </span>
       </motion.button>
 

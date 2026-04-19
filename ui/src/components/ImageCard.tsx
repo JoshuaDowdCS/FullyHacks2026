@@ -18,24 +18,18 @@ const variants = {
     x: 0,
     rotate: 0,
   },
-  exitLeft: {
-    x: -400,
-    rotate: -12,
+  exit: (direction: "left" | "right" | null) => ({
+    x: direction === "left" ? -400 : 400,
+    rotate: direction === "left" ? -12 : 12,
     opacity: 0,
-    transition: { duration: 0.3 },
-  },
-  exitRight: {
-    x: 400,
-    rotate: 12,
-    opacity: 0,
-    transition: { duration: 0.3 },
-  },
+    transition: { duration: 0.18 },
+  }),
 };
 
 export default function ImageCard({ image, direction }: ImageCardProps) {
   return (
     <div className="flex flex-col items-center">
-      <AnimatePresence mode="wait" custom={direction}>
+      <AnimatePresence mode="popLayout" custom={direction}>
         <motion.div
           key={image.filename}
           className="relative w-[480px] max-w-[85vw] rounded-2xl overflow-hidden cursor-grab"
@@ -46,8 +40,9 @@ export default function ImageCard({ image, direction }: ImageCardProps) {
           variants={variants}
           initial="enter"
           animate="center"
-          exit={direction === "left" ? "exitLeft" : "exitRight"}
-          transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+          custom={direction}
+          exit="exit"
+          transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
         >
           {/* Image + bounding boxes in a relative wrapper so boxes align to the image */}
           <div className="relative">
@@ -57,6 +52,24 @@ export default function ImageCard({ image, direction }: ImageCardProps) {
               className="w-full block"
               draggable={false}
             />
+
+            {/* Dark overlay with cutouts for bounding boxes */}
+            <svg
+              className="absolute inset-0 w-full h-full"
+              viewBox="0 0 1 1"
+              preserveAspectRatio="none"
+              style={{ pointerEvents: "none" }}
+            >
+              <path
+                fillRule="evenodd"
+                fill="rgba(0,0,0,0.45)"
+                d={`M0 0H1V1H0Z${image.labels.map((l) => {
+                  const x = l.x_center - l.width / 2;
+                  const y = l.y_center - l.height / 2;
+                  return `M${x} ${y}h${l.width}v${l.height}h${-l.width}Z`;
+                }).join("")}`}
+              />
+            </svg>
 
           {image.labels.map((label, i) => (
             <div

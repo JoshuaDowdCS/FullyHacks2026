@@ -19,6 +19,13 @@ export default function KeyHints() {
       <span className="flex items-center gap-1.5">
         <kbd className="inline-block px-2 py-0.5 rounded text-[11px]"
           style={{ background: "rgba(255,255,255,0.1)" }}>
+          &darr;
+        </kbd>
+        undo
+      </span>
+      <span className="flex items-center gap-1.5">
+        <kbd className="inline-block px-2 py-0.5 rounded text-[11px]"
+          style={{ background: "rgba(255,255,255,0.1)" }}>
           &rarr;
         </kbd>
         keep

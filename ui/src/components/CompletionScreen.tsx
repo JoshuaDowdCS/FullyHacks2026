@@ -5,6 +5,7 @@ interface CompletionScreenProps {
   discarded: number;
   onUpload: () => void;
   onRestart: () => void;
+  onNewDataset: () => void;
   uploading: boolean;
   uploaded: boolean;
   uploadProject?: string;
@@ -15,6 +16,7 @@ export default function CompletionScreen({
   discarded,
   onUpload,
   onRestart,
+  onNewDataset,
   uploading,
   uploaded,
   uploadProject,
@@ -54,6 +56,12 @@ export default function CompletionScreen({
             Uploaded to {uploadProject}
           </div>
           <div className="text-text-dim text-xs">Done!</div>
+          <button
+            onClick={onNewDataset}
+            className="mt-4 font-mono text-[10px] tracking-wide text-text-dim hover:text-bio-cyan transition-colors bg-transparent border-none cursor-pointer"
+          >
+            New Dataset
+          </button>
         </div>
       ) : (
         <div className="flex flex-col items-center gap-3">
@@ -74,6 +82,14 @@ export default function CompletionScreen({
             className="font-mono text-[10px] tracking-wide text-text-dim hover:text-bio-blue transition-colors bg-transparent border-none cursor-pointer"
           >
             or restart at higher confidence
+          </button>
+
+          <button
+            onClick={onNewDataset}
+            disabled={uploading}
+            className="font-mono text-[10px] tracking-wide text-text-dim hover:text-bio-cyan transition-colors bg-transparent border-none cursor-pointer"
+          >
+            New Dataset
           </button>
         </div>
       )}

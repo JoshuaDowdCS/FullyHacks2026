@@ -68,8 +68,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
         datefmt="%H:%M:%S",
     )
-    # Mute noisy version-upgrade nag from the inference SDK
+    # Mute noisy third-party loggers
     logging.getLogger("inference").setLevel(logging.ERROR)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
 
     # Derive upload project name from prompt
     upload_project = ""
@@ -93,7 +95,7 @@ def main() -> None:
     if not config.roboflow_configured and not config.gemini_configured:
         parser.error(
             "At least one backend must be configured.\n"
-            "Set ROBOFLOW_API_KEY and/or GEMINI_BASE_URL environment variables."
+            "Set ROBOFLOW_API_KEY and/or GEMINI_API_KEY environment variables."
         )
 
     try:

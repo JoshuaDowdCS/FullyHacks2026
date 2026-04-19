@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ImageInfo } from "./api";
-import { discardImage, fetchImages, keepImage, restartPipeline, uploadToRoboflow } from "./api";
+import type { ImageInfo, PipelineEvent } from "./api";
+import { discardImage, fetchImages, keepImage, restartPipeline, runPipeline, undoAction, uploadToRoboflow } from "./api";
 import OceanEnvironment from "./components/OceanEnvironment";
+import HomeOcean from "./components/HomeOcean";
 import HUD from "./components/HUD";
 import ProgressBar from "./components/ProgressBar";
 import ImageCard from "./components/ImageCard";
@@ -10,8 +11,10 @@ import KeyHints from "./components/KeyHints";
 import RestartModal from "./components/RestartModal";
 import CompletionScreen from "./components/CompletionScreen";
 import LoadingState from "./components/LoadingState";
+import HomeScreen from "./components/HomeScreen";
+import RunProgress from "./components/RunProgress";
 
-type Phase = "loading" | "review" | "complete" | "restarting" | "uploading" | "uploaded";
+type Phase = "home" | "running" | "review" | "complete" | "restarting" | "uploading" | "uploaded";
 
 export default function App() {
   const [images, setImages] = useState<ImageInfo[]>([]);
@@ -19,54 +22,113 @@ export default function App() {
   const [kept, setKept] = useState(0);
   const [discarded, setDiscarded] = useState(0);
   const [confThreshold, setConfThreshold] = useState(0.7);
-  const [phase, setPhase] = useState<Phase>("loading");
+  const [phase, setPhase] = useState<Phase>("home");
   const [direction, setDirection] = useState<"left" | "right" | null>(null);
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [uploadProject, setUploadProject] = useState<string>();
   const [uploadStatus, setUploadStatus] = useState<"idle" | "uploading" | "uploaded">("idle");
   const [error, setError] = useState<string>();
-
-  // Load images on mount
-  useEffect(() => {
-    fetchImages()
-      .then((data) => {
-        setImages(data.images);
-        setConfThreshold(data.conf_threshold);
-        setPhase(data.images.length > 0 ? "review" : "complete");
-      })
-      .catch((err) => setError(err.message));
-  }, []);
+  const [runProgress, setRunProgress] = useState<PipelineEvent | null>(null);
+  const [undoStack, setUndoStack] = useState<{ action: "keep" | "discard"; image: ImageInfo; index: number }[]>([]);
 
   const currentImage = images[currentIndex];
   const remaining = images.length - currentIndex;
+
+  const handleLaunch = useCallback((prompt: string, conf: number) => {
+    setConfThreshold(conf);
+    setPhase("running");
+    setRunProgress(null);
+    setError(undefined);
+
+    runPipeline(prompt, conf, async (event) => {
+      setRunProgress(event);
+
+      if (event.step === "done") {
+        try {
+          const data = await fetchImages();
+          setImages(data.images);
+          setConfThreshold(data.conf_threshold);
+          setCurrentIndex(0);
+          setKept(0);
+          setDiscarded(0);
+          setPhase(data.images.length > 0 ? "review" : "complete");
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Failed to load images");
+          setPhase("home");
+        }
+      } else if (event.step === "error") {
+        setError(event.message);
+        setPhase("home");
+      }
+    });
+  }, []);
+
+  const handleNewDataset = useCallback(() => {
+    setPhase("home");
+    setConfThreshold(0.7);
+    setImages([]);
+    setCurrentIndex(0);
+    setKept(0);
+    setDiscarded(0);
+    setUploadStatus("idle");
+    setUploadProject(undefined);
+    setRunProgress(null);
+    setError(undefined);
+    setUndoStack([]);
+  }, []);
 
   const handleKeep = useCallback(() => {
     if (phase !== "review" || !currentImage) return;
     setDirection("right");
     setKept((k) => k + 1);
+    setUndoStack((s) => [...s.slice(-(3 - 1)), { action: "keep", image: currentImage, index: currentIndex }]);
     keepImage(currentImage.filename).catch(() => {});
-    setTimeout(() => {
-      if (currentIndex + 1 >= images.length) {
-        setPhase("complete");
-      } else {
-        setCurrentIndex((i) => i + 1);
-      }
-    }, 50);
+    if (currentIndex + 1 >= images.length) {
+      setPhase("complete");
+    } else {
+      setCurrentIndex((i) => i + 1);
+    }
   }, [phase, currentImage, currentIndex, images.length]);
 
   const handleDiscard = useCallback(() => {
     if (phase !== "review" || !currentImage) return;
     setDirection("left");
     setDiscarded((d) => d + 1);
+    setUndoStack((s) => [...s.slice(-(3 - 1)), { action: "discard", image: currentImage, index: currentIndex }]);
     discardImage(currentImage.filename).catch(() => {});
-    // Remove from array so it doesn't appear again
     const newImages = images.filter((_, i) => i !== currentIndex);
     setImages(newImages);
-    // Don't increment index since array shifted
     if (currentIndex >= newImages.length) {
       setPhase("complete");
     }
   }, [phase, currentImage, currentIndex, images]);
+
+  const handleUndo = useCallback(() => {
+    if (undoStack.length === 0) return;
+    if (phase !== "review" && phase !== "complete") return;
+
+    const entry = undoStack[undoStack.length - 1];
+    setUndoStack((s) => s.slice(0, -1));
+    setDirection(null);
+    undoAction().catch(() => {});
+
+    if (entry.action === "keep") {
+      setKept((k) => k - 1);
+      setCurrentIndex(entry.index);
+    } else {
+      setDiscarded((d) => d - 1);
+      setImages((imgs) => {
+        const newImgs = [...imgs];
+        newImgs.splice(entry.index, 0, entry.image);
+        return newImgs;
+      });
+      setCurrentIndex(entry.index);
+    }
+
+    if (phase === "complete") {
+      setPhase("review");
+    }
+  }, [undoStack, phase]);
 
   const handleRestart = useCallback(() => {
     setShowRestartModal(true);
@@ -79,7 +141,6 @@ export default function App() {
     try {
       const result = await restartPipeline();
       setConfThreshold(result.new_threshold);
-      // Reload images
       const data = await fetchImages();
       setImages(data.images);
       setCurrentIndex(0);
@@ -108,10 +169,31 @@ export default function App() {
     }
   }, [phase, uploadStatus]);
 
+  // Preload upcoming images
+  useEffect(() => {
+    if (phase !== "review") return;
+    for (let i = 1; i <= 3; i++) {
+      const img = images[currentIndex + i];
+      if (img) {
+        const link = document.createElement("link");
+        link.rel = "prefetch";
+        link.as = "image";
+        link.href = `/api/images/${encodeURIComponent(img.filename)}`;
+        document.head.appendChild(link);
+      }
+    }
+  }, [phase, currentIndex, images]);
+
   // Keyboard shortcuts
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (showRestartModal) return;
+
+      if (e.key === "ArrowDown") {
+        handleUndo();
+        return;
+      }
+
       if (phase !== "review") return;
 
       switch (e.key) {
@@ -133,24 +215,30 @@ export default function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [phase, showRestartModal, handleKeep, handleDiscard, handleRestart, handleUpload]);
+  }, [phase, showRestartModal, handleKeep, handleDiscard, handleUndo, handleRestart, handleUpload]);
+
+  const isHomeOrRunning = phase === "home" || phase === "running";
 
   return (
     <>
-      <OceanEnvironment />
+      {isHomeOrRunning ? <HomeOcean /> : <OceanEnvironment />}
 
       <div className="relative z-10">
-        <HUD
-          remaining={remaining}
-          kept={kept}
-          discarded={discarded}
-          confThreshold={confThreshold}
-        />
+        {!isHomeOrRunning && (
+          <>
+            <HUD
+              remaining={remaining}
+              kept={kept}
+              discarded={discarded}
+              confThreshold={confThreshold}
+            />
 
-        <ProgressBar
-          reviewed={kept + discarded}
-          total={kept + discarded + remaining}
-        />
+            <ProgressBar
+              reviewed={kept + discarded}
+              total={kept + discarded + remaining}
+            />
+          </>
+        )}
 
         {phase === "review" && (
           <button
@@ -184,7 +272,13 @@ export default function App() {
         )}
 
         <div className="flex flex-col items-center justify-center min-h-screen px-16 pt-[100px] pb-[260px]">
-          {phase === "loading" && <LoadingState message="Loading images..." />}
+          {phase === "home" && (
+            <HomeScreen onLaunch={handleLaunch} />
+          )}
+
+          {phase === "running" && (
+            <RunProgress event={runProgress} confThreshold={confThreshold} />
+          )}
 
           {phase === "restarting" && (
             <LoadingState message={`Re-scanning at ${confThreshold.toFixed(2)}...`} />
@@ -200,6 +294,7 @@ export default function App() {
               discarded={discarded}
               onUpload={handleUpload}
               onRestart={handleRestart}
+              onNewDataset={handleNewDataset}
               uploading={uploadStatus === "uploading"}
               uploaded={uploadStatus === "uploaded"}
               uploadProject={uploadProject}
@@ -231,6 +326,8 @@ export default function App() {
               onDiscard={handleDiscard}
               onRestart={handleRestart}
               onKeep={handleKeep}
+              onUndo={handleUndo}
+              canUndo={undoStack.length > 0}
             />
             <KeyHints />
           </>

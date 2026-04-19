@@ -63,6 +63,12 @@ export async function discardImage(filename: string): Promise<void> {
   }
 }
 
+export async function undoAction(): Promise<{ action: string; filename: string }> {
+  const res = await fetch("/api/undo", { method: "POST" });
+  if (!res.ok) throw new Error(`Undo failed: ${res.status}`);
+  return res.json();
+}
+
 export async function restartPipeline(): Promise<RestartResponse> {
   const res = await fetch("/api/restart", { method: "POST" });
   if (!res.ok) throw new Error(`Restart failed: ${res.status}`);
@@ -73,4 +79,65 @@ export async function uploadToRoboflow(): Promise<UploadResponse> {
   const res = await fetch("/api/upload", { method: "POST" });
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
   return res.json();
+}
+
+// ── SSE Pipeline Events ──
+
+export interface PipelineEvent {
+  step: "discovery" | "download" | "inference" | "done" | "error";
+  message: string;
+  current?: number;
+  total?: number;
+  labeled?: number;
+}
+
+export function runPipeline(
+  prompt: string,
+  confThreshold: number,
+  onEvent: (event: PipelineEvent) => void,
+): { cancel: () => void } {
+  const controller = new AbortController();
+
+  fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, conf_threshold: confThreshold }),
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        onEvent({ step: "error", message: `Server error: ${res.status}` });
+        return;
+      }
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop()!;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("data: ")) {
+            try {
+              const event: PipelineEvent = JSON.parse(trimmed.slice(6));
+              onEvent(event);
+            } catch {
+              // skip malformed lines
+            }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== "AbortError") {
+        onEvent({ step: "error", message: err.message });
+      }
+    });
+
+  return { cancel: () => controller.abort() };
 }

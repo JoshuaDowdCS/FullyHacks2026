@@ -9,18 +9,20 @@ interface HUDProps {
 
 function AnimatedNumber({ value, className }: { value: number; className?: string }) {
   return (
-    <AnimatePresence mode="popLayout">
-      <motion.span
-        key={value}
-        initial={{ y: -12, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        exit={{ y: 12, opacity: 0 }}
-        transition={{ duration: 0.2, ease: "easeOut" }}
-        className={className}
-      >
-        {value}
-      </motion.span>
-    </AnimatePresence>
+    <span className="inline-flex overflow-hidden" style={{ height: "1.75em" }}>
+      <AnimatePresence mode="popLayout">
+        <motion.span
+          key={value}
+          initial={{ y: -12, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: 12, opacity: 0 }}
+          transition={{ duration: 0.2, ease: "easeOut" }}
+          className={className}
+        >
+          {value}
+        </motion.span>
+      </AnimatePresence>
+    </span>
   );
 }
 

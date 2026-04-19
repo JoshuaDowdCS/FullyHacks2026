@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+import queue
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
 
 from detection_pipeline.config import PipelineConfig
@@ -25,7 +30,9 @@ from .models import (
     ImagesResponse,
     KeepResponse,
     RestartResponse,
+    RunRequest,
     StatsResponse,
+    UndoResponse,
     UploadResponse,
 )
 
@@ -38,6 +45,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logging.getLogger("inference").setLevel(logging.ERROR)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # Server state
@@ -49,6 +58,8 @@ _images_dir = Path(os.environ.get("IMAGES_DIR", str(_project_root / "dataset" / 
 _labels_dir = Path(os.environ.get("LABELS_DIR", str(_project_root / "dataset" / "labels")))
 _conf_threshold: float = float(os.environ.get("CONF_THRESHOLD", "0.7"))
 
+_trash_dir = _images_dir.parent / ".trash"
+
 _config = PipelineConfig(
     images_dir=_images_dir,
     labels_dir=_labels_dir,
@@ -59,6 +70,19 @@ _config = PipelineConfig(
 
 # Pipeline results keyed by filename — populated after run_pipeline
 _pipeline_results: dict[str, ImageResult] = {}
+
+
+@dataclass
+class _UndoEntry:
+    action: str  # "keep" or "discard"
+    original_filename: str
+    new_filename: str | None  # only for keep
+    result: ImageResult
+    keep_counter_before: int
+
+
+_undo_stack: list[_UndoEntry] = []
+_MAX_UNDO = 3
 
 # ---------------------------------------------------------------------------
 # App
@@ -182,6 +206,7 @@ def keep_image(filename: str):
     if not resolved.exists():
         raise HTTPException(status_code=404, detail="Image not found")
 
+    counter_before = _keep_counter
     _keep_counter += 1
     ext = resolved.suffix.lower()
     new_name = f"img_{_keep_counter:04d}{ext}"
@@ -189,9 +214,17 @@ def keep_image(filename: str):
 
     resolved.rename(new_image)
 
-    # Update pipeline results with new filename/path
     old_result = _pipeline_results.pop(filename, None)
     if old_result is not None:
+        _undo_stack.append(_UndoEntry(
+            action="keep",
+            original_filename=filename,
+            new_filename=new_name,
+            result=old_result,
+            keep_counter_before=counter_before,
+        ))
+        if len(_undo_stack) > _MAX_UNDO:
+            _undo_stack.pop(0)
         old_result.image_path = new_image
         _pipeline_results[new_name] = old_result
 
@@ -200,14 +233,67 @@ def keep_image(filename: str):
 
 @app.post("/api/images/{filename}/discard", status_code=204)
 def discard_image(filename: str):
-    """Delete an image and remove it from pipeline results."""
+    """Move an image to trash (supports undo)."""
     resolved = (_images_dir / filename).resolve()
     if not resolved.parent.samefile(_images_dir.resolve()):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    resolved.unlink(missing_ok=True)
-    _label_path(resolved).unlink(missing_ok=True)
-    _pipeline_results.pop(filename, None)
+    result = _pipeline_results.pop(filename, None)
+
+    _trash_dir.mkdir(parents=True, exist_ok=True)
+    if resolved.exists():
+        resolved.rename(_trash_dir / filename)
+    label = _label_path(resolved)
+    if label.exists():
+        label.rename(_trash_dir / label.name)
+
+    if result is not None:
+        _undo_stack.append(_UndoEntry(
+            action="discard",
+            original_filename=filename,
+            new_filename=None,
+            result=result,
+            keep_counter_before=_keep_counter,
+        ))
+        if len(_undo_stack) > _MAX_UNDO:
+            evicted = _undo_stack.pop(0)
+            if evicted.action == "discard":
+                (_trash_dir / evicted.original_filename).unlink(missing_ok=True)
+                (_trash_dir / f"{Path(evicted.original_filename).stem}.txt").unlink(missing_ok=True)
+
+
+@app.post("/api/undo", response_model=UndoResponse)
+def undo():
+    """Undo the last keep or discard action."""
+    global _keep_counter
+    if not _undo_stack:
+        raise HTTPException(status_code=400, detail="Nothing to undo")
+
+    entry = _undo_stack.pop()
+
+    if entry.action == "keep":
+        new_path = _images_dir / entry.new_filename
+        original_path = _images_dir / entry.original_filename
+        if new_path.exists():
+            new_path.rename(original_path)
+        _pipeline_results.pop(entry.new_filename, None)
+        entry.result.image_path = original_path
+        _pipeline_results[entry.original_filename] = entry.result
+        _keep_counter = entry.keep_counter_before
+        return UndoResponse(action="keep", filename=entry.original_filename)
+
+    # discard — restore from trash
+    trash_image = _trash_dir / entry.original_filename
+    original_path = _images_dir / entry.original_filename
+    if trash_image.exists():
+        trash_image.rename(original_path)
+    trash_label = _trash_dir / f"{Path(entry.original_filename).stem}.txt"
+    label_path = _label_path(original_path)
+    if trash_label.exists():
+        trash_label.rename(label_path)
+    entry.result.image_path = original_path
+    _pipeline_results[entry.original_filename] = entry.result
+    return UndoResponse(action="discard", filename=entry.original_filename)
 
 
 @app.post("/api/restart", response_model=RestartResponse)
@@ -243,6 +329,76 @@ def restart_pipeline():
             conf_threshold=_conf_threshold,
         ),
         new_threshold=_conf_threshold,
+    )
+
+
+@app.post("/api/run")
+async def run(body: RunRequest):
+    """Launch the pipeline and stream progress as SSE events."""
+    global _pipeline_results, _conf_threshold, _prompt, _config, _keep_counter
+
+    # Reset server state
+    _pipeline_results = {}
+    _conf_threshold = body.conf_threshold
+    _prompt = body.prompt
+    _keep_counter = 0
+    _undo_stack.clear()
+    if _trash_dir.is_dir():
+        shutil.rmtree(_trash_dir, ignore_errors=True)
+
+    _config = PipelineConfig(
+        images_dir=_images_dir,
+        labels_dir=_labels_dir,
+        prompt=body.prompt,
+        conf_threshold=body.conf_threshold,
+        keep_model_cache=True,
+        expand_query_with_gemini=bool(_config.gemini_configured),
+    )
+
+    progress_queue: queue.Queue[dict | None] = queue.Queue()
+
+    def on_progress(step: str, data: dict) -> None:
+        progress_queue.put({"step": step, **data})
+
+    async def run_in_thread() -> None:
+        global _pipeline_results
+        try:
+            _stats, results = await asyncio.to_thread(
+                run_pipeline, _config, on_progress
+            )
+            # Write label files to disk immediately
+            _labels_dir.mkdir(parents=True, exist_ok=True)
+            for r in results:
+                if r.boxes and not r.not_found:
+                    write_label_file(_labels_dir / f"{r.image_path.stem}.txt", r.boxes)
+            # Update global so GET /api/images sees the results
+            globals()["_pipeline_results"] = {r.image_path.name: r for r in results}
+        except Exception as exc:
+            progress_queue.put({"step": "error", "message": str(exc)})
+        finally:
+            progress_queue.put(None)  # sentinel
+
+    async def event_stream():
+        task = asyncio.create_task(run_in_thread())
+        try:
+            while True:
+                try:
+                    event = await asyncio.to_thread(progress_queue.get, timeout=0.5)
+                except queue.Empty:
+                    continue
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            await task
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

@@ -47,3 +47,13 @@ class KeepResponse(BaseModel):
 class UploadResponse(BaseModel):
     uploaded: int
     project: str
+
+
+class UndoResponse(BaseModel):
+    action: str
+    filename: str
+
+
+class RunRequest(BaseModel):
+    prompt: str
+    conf_threshold: float = 0.7
