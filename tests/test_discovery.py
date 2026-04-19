@@ -45,9 +45,10 @@ class TestComputeRelevance:
         model = {"name": "generic-model", "classes": ["cat", "dog"]}
         assert _compute_relevance(model, ["cat"]) >= 2.5
 
-    def test_no_match_scores_zero(self):
+    def test_no_match_is_focus_bonus_only(self):
         model = {"name": "something-else", "description": "unrelated"}
-        assert _compute_relevance(model, ["cat"]) == 0.0
+        # No textual match — only the focus bonus (1.5 / 1 class) applies
+        assert _compute_relevance(model, ["cat"]) == 1.5
 
     def test_description_match(self):
         model = {"name": "model", "description": "detects cat faces"}

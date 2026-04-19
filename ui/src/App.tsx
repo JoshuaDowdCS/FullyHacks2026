@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ImageInfo, PipelineEvent } from "./api";
-import { discardImage, fetchImages, keepImage, restartPipeline, runPipeline, undoAction, uploadToRoboflow } from "./api";
+import type { ImageInfo, ImageSource, PipelineEvent } from "./api";
+import { acquireImages, discardImage, fetchImages, keepImage, restartPipeline, runPipeline, undoAction, uploadToRoboflow } from "./api";
 import OceanEnvironment from "./components/OceanEnvironment";
 import HomeOcean from "./components/HomeOcean";
 import HUD from "./components/HUD";
@@ -14,7 +14,7 @@ import LoadingState from "./components/LoadingState";
 import HomeScreen from "./components/HomeScreen";
 import RunProgress from "./components/RunProgress";
 
-type Phase = "home" | "running" | "review" | "complete" | "restarting" | "uploading" | "uploaded";
+type Phase = "home" | "acquiring" | "running" | "review" | "complete" | "restarting" | "uploading" | "uploaded";
 
 export default function App() {
   const [images, setImages] = useState<ImageInfo[]>([]);
@@ -34,11 +34,9 @@ export default function App() {
   const currentImage = images[currentIndex];
   const remaining = images.length - currentIndex;
 
-  const handleLaunch = useCallback((prompt: string, conf: number) => {
-    setConfThreshold(conf);
+  const launchPipeline = useCallback((prompt: string, conf: number) => {
     setPhase("running");
     setRunProgress(null);
-    setError(undefined);
 
     runPipeline(prompt, conf, async (event) => {
       setRunProgress(event);
@@ -62,6 +60,27 @@ export default function App() {
       }
     });
   }, []);
+
+  const handleLaunch = useCallback((prompt: string, conf: number, source: ImageSource) => {
+    setConfThreshold(conf);
+    setRunProgress(null);
+    setError(undefined);
+
+    if (source.type === "existing") {
+      launchPipeline(prompt, conf);
+    } else {
+      setPhase("acquiring");
+      acquireImages(prompt, source, (event) => {
+        setRunProgress(event);
+        if (event.step === "done") {
+          launchPipeline(prompt, conf);
+        } else if (event.step === "error") {
+          setError(event.message);
+          setPhase("home");
+        }
+      });
+    }
+  }, [launchPipeline]);
 
   const handleNewDataset = useCallback(() => {
     setPhase("home");
@@ -217,7 +236,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [phase, showRestartModal, handleKeep, handleDiscard, handleUndo, handleRestart, handleUpload]);
 
-  const isHomeOrRunning = phase === "home" || phase === "running";
+  const isHomeOrRunning = phase === "home" || phase === "running" || phase === "acquiring";
 
   return (
     <>
@@ -274,6 +293,10 @@ export default function App() {
         <div className="flex flex-col items-center justify-center min-h-screen px-16 pt-[100px] pb-[260px]">
           {phase === "home" && (
             <HomeScreen onLaunch={handleLaunch} />
+          )}
+
+          {phase === "acquiring" && (
+            <RunProgress event={runProgress} confThreshold={confThreshold} />
           )}
 
           {phase === "running" && (

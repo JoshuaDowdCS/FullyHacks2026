@@ -78,7 +78,7 @@ class TestListImages:
             assert img["width"] == 640
             assert img["height"] == 480
             assert len(img["labels"]) == 1
-            assert img["labels"][0]["class_name"] == "basketball"
+            assert img["labels"][0]["class_name"] == "object"
 
     def test_image_without_labels(self):
         with tempfile.TemporaryDirectory() as td:
@@ -168,8 +168,8 @@ class TestStats:
 
 
 class TestRestart:
-    @patch("api.main.run_pipeline")
-    def test_increments_threshold(self, mock_run):
+    @patch("api.main.refilter_results")
+    def test_increments_threshold(self, mock_refilter):
         with tempfile.TemporaryDirectory() as td:
             img_dir = Path(td) / "images"
             lbl_dir = Path(td) / "labels"
@@ -180,10 +180,10 @@ class TestRestart:
                 boxes=[YoloBox(class_id=0, x_center=0.5, y_center=0.5, width=0.3, height=0.4)],
                 source="roboflow",
             )
-            mock_run.return_value = (MagicMock(), [result])
+            mock_refilter.return_value = (MagicMock(), [result])
 
             resp = client.post("/api/restart")
             assert resp.status_code == 200
             data = resp.json()
             assert data["new_threshold"] == 0.75
-            assert mock_run.called
+            assert mock_refilter.called

@@ -6,15 +6,48 @@ must be downloadable), and ranks by textual relevance to the user prompt.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 UNIVERSE_SEARCH_URL = "https://api.roboflow.com/universe/search"
+
+_DISCOVERY_CACHE_DIR = Path(".cache/discovery")
+_CACHE_TTL_SECONDS = 3600  # 1 hour
+
+
+def _cache_key(query: str) -> str:
+    return hashlib.sha256(query.lower().strip().encode()).hexdigest()[:16]
+
+
+def _read_cache(query: str) -> list[dict] | None:
+    """Return cached search results if fresh, else None."""
+    cache_file = _DISCOVERY_CACHE_DIR / f"{_cache_key(query)}.json"
+    if not cache_file.exists():
+        return None
+    try:
+        data = json.loads(cache_file.read_text())
+        if time.time() - data.get("ts", 0) < _CACHE_TTL_SECONDS:
+            logger.info("Discovery cache hit for %r", query)
+            return data["results"]
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _write_cache(query: str, results: list[dict]) -> None:
+    """Persist search results with timestamp."""
+    _DISCOVERY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = _DISCOVERY_CACHE_DIR / f"{_cache_key(query)}.json"
+    cache_file.write_text(json.dumps({"ts": time.time(), "q": query, "results": results}))
 
 
 @dataclass
@@ -131,11 +164,19 @@ def _compute_relevance(model_info: dict, query_terms: list[str]) -> float:
 # Search API
 # ---------------------------------------------------------------------------
 
-def search_models(query: str, api_key: str, max_pages: int = 3) -> list[dict]:
+def search_models(
+    query: str, api_key: str, max_pages: int = 3, *, bypass_cache: bool = False,
+) -> list[dict]:
     """Search Roboflow Universe for public models.
 
     Endpoint returns 12 results per page; we fetch up to *max_pages*.
+    Uses a 1-hour disk cache unless *bypass_cache* is True.
     """
+    if not bypass_cache:
+        cached = _read_cache(query)
+        if cached is not None:
+            return cached
+
     all_results: list[dict] = []
     for page in range(1, max_pages + 1):
         try:
@@ -160,6 +201,8 @@ def search_models(query: str, api_key: str, max_pages: int = 3) -> list[dict]:
             break
 
     logger.info("Discovery: %d total results for %r", len(all_results), query)
+    if all_results:
+        _write_cache(query, all_results)
     return all_results
 
 
@@ -238,12 +281,13 @@ def discover_models(
     api_key: str,
     min_relevance: float = 1.0,
     max_candidates: int = 5,
+    bypass_cache: bool = False,
 ) -> list[DiscoveredModel]:
     """Discover the best object-detection models for *query*.
 
     Returns a ranked list (best first). Empty when nothing passes filters.
     """
-    raw_results = search_models(query, api_key)
+    raw_results = search_models(query, api_key, bypass_cache=bypass_cache)
     if not raw_results:
         logger.warning("No models found for query: %r", query)
         return []

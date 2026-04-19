@@ -1,15 +1,28 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
 # Python
 .venv/
+venv/
 __pycache__/
+*.py[cod]
 *.pyc
 *.egg-info/
 .pytest_cache/
 
 # Project
 .cache/
-.env
 dataset/
 .superpowers/
+models/
+
+# Downloaded data
+images/
+frames/
+unclean_images/
+.scraper_staging/
 
 # Frontend
 ui/node_modules/

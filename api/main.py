@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import queue
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,12 +18,15 @@ from PIL import Image
 
 from detection_pipeline.config import PipelineConfig
 from detection_pipeline.discovery import normalize_query
-from detection_pipeline.pipeline import IMAGE_EXTENSIONS, ImageResult, run_pipeline
+from detection_pipeline.pipeline import IMAGE_EXTENSIONS, ImageResult, refilter_results, run_pipeline
 from detection_pipeline.upload import upload_to_roboflow
 from detection_pipeline.yolo import YoloBox, write_label_file
 
+from . import models
 from .models import (
     CLASS_NAMES,
+    AcquireWebRequest,
+    AcquireYouTubeRequest,
     ImageInfo,
     ImageLabel,
     ImagesResponse,
@@ -140,11 +142,14 @@ def _build_image_info(result: ImageResult) -> ImageInfo:
         for b in result.boxes
     ]
 
-    try:
-        with Image.open(result.image_path) as img:
-            w, h = img.size
-    except Exception:
-        w, h = 0, 0
+    # Use cached dimensions from pipeline when available, avoid re-opening image
+    w, h = result.img_width, result.img_height
+    if not w or not h:
+        try:
+            with Image.open(result.image_path) as img:
+                w, h = img.size
+        except Exception:
+            w, h = 0, 0
 
     return ImageInfo(
         filename=result.image_path.name,
@@ -298,7 +303,7 @@ def undo():
 
 @app.post("/api/restart", response_model=RestartResponse)
 def restart_pipeline():
-    """Re-run the pipeline with confidence threshold increased by +0.05."""
+    """Re-filter results at a higher threshold without re-running the full pipeline."""
     global _conf_threshold, _config, _pipeline_results
 
     _conf_threshold = round(_conf_threshold + 0.05, 2)
@@ -312,12 +317,25 @@ def restart_pipeline():
         expand_query_with_gemini=bool(_config.gemini_configured),
     )
 
+    previous = list(_pipeline_results.values())
+
     try:
-        _stats, results = run_pipeline(_config)
-    except (RuntimeError, FileNotFoundError) as exc:
+        _stats, results = refilter_results(
+            previous,
+            new_threshold=_conf_threshold,
+            gemini_api_key=_config.gemini_api_key,
+            prompt=_prompt,
+        )
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
     _pipeline_results = {r.image_path.name: r for r in results}
+
+    # Write updated labels
+    _labels_dir.mkdir(parents=True, exist_ok=True)
+    for r in results:
+        if r.boxes and not r.not_found:
+            write_label_file(_labels_dir / f"{r.image_path.stem}.txt", r.boxes)
 
     total = len(_pipeline_results)
     labeled = sum(1 for r in _pipeline_results.values() if r.boxes and not r.not_found)
@@ -342,6 +360,7 @@ async def run(body: RunRequest):
     _conf_threshold = body.conf_threshold
     _prompt = body.prompt
     _keep_counter = 0
+    models.CLASS_NAMES = {0: body.prompt}
     _undo_stack.clear()
     if _trash_dir.is_dir():
         shutil.rmtree(_trash_dir, ignore_errors=True)
@@ -355,10 +374,12 @@ async def run(body: RunRequest):
         expand_query_with_gemini=bool(_config.gemini_configured),
     )
 
-    progress_queue: queue.Queue[dict | None] = queue.Queue()
+    progress_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    loop = asyncio.get_event_loop()
 
     def on_progress(step: str, data: dict) -> None:
-        progress_queue.put({"step": step, **data})
+        # Called from pipeline thread — use threadsafe put
+        loop.call_soon_threadsafe(progress_queue.put_nowait, {"step": step, **data})
 
     async def run_in_thread() -> None:
         global _pipeline_results
@@ -374,18 +395,17 @@ async def run(body: RunRequest):
             # Update global so GET /api/images sees the results
             globals()["_pipeline_results"] = {r.image_path.name: r for r in results}
         except Exception as exc:
-            progress_queue.put({"step": "error", "message": str(exc)})
+            loop.call_soon_threadsafe(
+                progress_queue.put_nowait, {"step": "error", "message": str(exc)}
+            )
         finally:
-            progress_queue.put(None)  # sentinel
+            loop.call_soon_threadsafe(progress_queue.put_nowait, None)  # sentinel
 
     async def event_stream():
         task = asyncio.create_task(run_in_thread())
         try:
             while True:
-                try:
-                    event = await asyncio.to_thread(progress_queue.get, timeout=0.5)
-                except queue.Empty:
-                    continue
+                event = await progress_queue.get()
                 if event is None:
                     break
                 yield f"data: {json.dumps(event)}\n\n"
@@ -411,14 +431,11 @@ def upload():
     slug = normalize_query(_prompt).replace(" ", "-")
     project_name = f"{slug}-detection" if slug else "detection-pipeline"
 
-    # Write label files for all results that have detections
-    _labels_dir.mkdir(parents=True, exist_ok=True)
-    labeled_count = 0
-    for result in _pipeline_results.values():
-        if result.boxes and not result.not_found:
-            label_path = _labels_dir / f"{result.image_path.stem}.txt"
-            write_label_file(label_path, result.boxes)
-            labeled_count += 1
+    # Labels are already written to disk by the run() endpoint;
+    # just count how many we have.
+    labeled_count = sum(
+        1 for r in _pipeline_results.values() if r.boxes and not r.not_found
+    )
 
     if labeled_count == 0:
         raise HTTPException(status_code=400, detail="No labeled images to upload")
@@ -434,3 +451,146 @@ def upload():
         raise HTTPException(status_code=500, detail=str(exc))
 
     return UploadResponse(uploaded=labeled_count, project=project_name)
+
+
+# ---------------------------------------------------------------------------
+# Image acquisition endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/acquire/web")
+async def acquire_web(body: AcquireWebRequest):
+    """Acquire images from the web and stream progress as SSE events."""
+    progress_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def on_progress(step: str, data: dict) -> None:
+        loop.call_soon_threadsafe(progress_queue.put_nowait, {"step": step, **data})
+
+    async def run_in_thread() -> None:
+        try:
+            from tools.webscraper import run_scraper, slugify
+
+            staging_dir = _project_root / ".scraper_staging" / slugify(body.prompt)
+            try:
+                count = await asyncio.to_thread(
+                    run_scraper,
+                    query=body.prompt,
+                    out_dir=staging_dir,
+                    count=body.count,
+                    on_progress=on_progress,
+                )
+
+                # Copy acquired images to dataset/images/
+                keep_dir = staging_dir / "review" / "keep"
+                if keep_dir.is_dir():
+                    _images_dir.mkdir(parents=True, exist_ok=True)
+                    copied = 0
+                    for img in keep_dir.iterdir():
+                        if img.is_file():
+                            shutil.copy2(img, _images_dir / img.name)
+                            copied += 1
+                    loop.call_soon_threadsafe(
+                        progress_queue.put_nowait,
+                        {"step": "done", "message": f"Acquired {copied} images.", "images_acquired": copied},
+                    )
+            finally:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+        except ImportError:
+            loop.call_soon_threadsafe(
+                progress_queue.put_nowait,
+                {"step": "error", "message": "Web scraper dependencies not installed (pip install icrawler)"},
+            )
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                progress_queue.put_nowait,
+                {"step": "error", "message": str(exc)},
+            )
+        finally:
+            loop.call_soon_threadsafe(progress_queue.put_nowait, None)
+
+    async def event_stream():
+        task = asyncio.create_task(run_in_thread())
+        try:
+            while True:
+                event = await progress_queue.get()
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            await task
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/acquire/youtube")
+async def acquire_youtube(body: AcquireYouTubeRequest):
+    """Acquire frames from YouTube and stream progress as SSE events."""
+    progress_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def on_progress(step: str, data: dict) -> None:
+        loop.call_soon_threadsafe(progress_queue.put_nowait, {"step": step, **data})
+
+    async def run_in_thread() -> None:
+        try:
+            from tools.webscraper import slugify
+            from tools.ytwebscraper import run_yt_scraper
+
+            staging_dir = _project_root / ".scraper_staging" / f"yt_{slugify(body.prompt)}"
+            try:
+                count = await asyncio.to_thread(
+                    run_yt_scraper,
+                    query=body.prompt,
+                    out_dir=staging_dir,
+                    youtube_url=body.youtube_url,
+                    max_videos=body.max_videos,
+                    on_progress=on_progress,
+                )
+
+                keep_dir = staging_dir / "review" / "keep"
+                if keep_dir.is_dir():
+                    _images_dir.mkdir(parents=True, exist_ok=True)
+                    copied = 0
+                    for img in keep_dir.iterdir():
+                        if img.is_file():
+                            shutil.copy2(img, _images_dir / img.name)
+                            copied += 1
+                    loop.call_soon_threadsafe(
+                        progress_queue.put_nowait,
+                        {"step": "done", "message": f"Acquired {copied} frames.", "images_acquired": copied},
+                    )
+            finally:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+        except ImportError:
+            loop.call_soon_threadsafe(
+                progress_queue.put_nowait,
+                {"step": "error", "message": "YouTube scraper dependencies not installed (pip install yt-dlp imagehash)"},
+            )
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                progress_queue.put_nowait,
+                {"step": "error", "message": str(exc)},
+            )
+        finally:
+            loop.call_soon_threadsafe(progress_queue.put_nowait, None)
+
+    async def event_stream():
+        task = asyncio.create_task(run_in_thread())
+        try:
+            while True:
+                event = await progress_queue.get()
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            await task
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

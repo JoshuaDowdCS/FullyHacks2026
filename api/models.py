@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-CLASS_NAMES: dict[int, str] = {0: "basketball"}
+CLASS_NAMES: dict[int, str] = {0: "object"}
 
 
 class ImageLabel(BaseModel):
@@ -57,3 +57,14 @@ class UndoResponse(BaseModel):
 class RunRequest(BaseModel):
     prompt: str
     conf_threshold: float = 0.7
+
+
+class AcquireWebRequest(BaseModel):
+    prompt: str
+    count: int = 200
+
+
+class AcquireYouTubeRequest(BaseModel):
+    prompt: str
+    youtube_url: str
+    max_videos: int = 5

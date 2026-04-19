@@ -22,7 +22,7 @@ from pathlib import Path
 from .config import PipelineConfig
 from .discovery import DiscoveredModel, discover_models, normalize_query
 from .gemini_client import GeminiClient
-from .local_inference import LocalModel
+from .local_inference import Detection, LocalModel
 from .yolo import YoloBox, normalize_box
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,10 @@ class ImageResult:
     source: str = ""  # "roboflow", "gemini", or ""
     not_found: bool = False  # Gemini said OBJECT NOT FOUND
     error: str = ""  # non-empty if processing failed
+    img_width: int = 0
+    img_height: int = 0
+    # Raw YOLO detections (all confidences) for threshold re-filtering on restart
+    raw_detections: list[Detection] = field(default_factory=list)
 
 
 # -----------------------------------------------------------------------
@@ -144,24 +148,34 @@ def run_pipeline(
     # --- rename images to clean sequential names (two-pass to avoid collisions) ---
     images: list[Path] = []
     width = len(str(len(raw_images)))
-    # Pass 1: move to temporary names so no target can collide with a source
-    tmp_paths: list[Path] = []
-    for i, p in enumerate(raw_images, 1):
-        tmp_name = f"_tmp_{i:0{width}}{p.suffix.lower()}"
-        tmp_path = p.parent / tmp_name
-        p.rename(tmp_path)
-        tmp_paths.append(tmp_path)
-    # Pass 2: move from temporary names to final sequential names
-    renamed = 0
-    for i, tmp in enumerate(tmp_paths, 1):
-        clean_name = f"{i:0{width}}{tmp.suffix.lower()}"
-        new_path = tmp.parent / clean_name
-        tmp.rename(new_path)
-        if raw_images[i - 1] != new_path:
-            renamed += 1
-        images.append(new_path)
-    if renamed:
-        logger.info("Renamed %d images → %s … %s", renamed, images[0].name, images[-1].name)
+
+    # Check if images are already in sequential {1..N}.{ext} format — skip rename if so
+    already_sequential = all(
+        p.stem == f"{i:0{width}}" for i, p in enumerate(raw_images, 1)
+    )
+
+    if already_sequential:
+        images = list(raw_images)
+        logger.debug("Images already sequentially named — skipping rename")
+    else:
+        # Pass 1: move to temporary names so no target can collide with a source
+        tmp_paths: list[Path] = []
+        for i, p in enumerate(raw_images, 1):
+            tmp_name = f"_tmp_{i:0{width}}{p.suffix.lower()}"
+            tmp_path = p.parent / tmp_name
+            p.rename(tmp_path)
+            tmp_paths.append(tmp_path)
+        # Pass 2: move from temporary names to final sequential names
+        renamed = 0
+        for i, tmp in enumerate(tmp_paths, 1):
+            clean_name = f"{i:0{width}}{tmp.suffix.lower()}"
+            new_path = tmp.parent / clean_name
+            tmp.rename(new_path)
+            if raw_images[i - 1] != new_path:
+                renamed += 1
+            images.append(new_path)
+        if renamed:
+            logger.info("Renamed %d images → %s … %s", renamed, images[0].name, images[-1].name)
 
     stats.total = len(images)
     logger.info("Found %d images in %s", len(images), config.images_dir)
@@ -185,7 +199,10 @@ def run_pipeline(
 
     if config.roboflow_configured:
         try:
-            candidates = discover_models(search_query, config.roboflow_api_key)
+            candidates = discover_models(
+                search_query, config.roboflow_api_key,
+                bypass_cache=config.refresh_model,
+            )
         except Exception as exc:
             logger.error("Roboflow discovery failed: %s", exc)
             if not config.gemini_configured:
@@ -343,7 +360,9 @@ def _process_roboflow_phase(
         ]
         stats.labeled += 1
         stats.roboflow_labeled += 1
-        return ImageResult(image_path=image_path, boxes=boxes, source="roboflow"), False
+        return ImageResult(image_path=image_path, boxes=boxes, source="roboflow",
+                           img_width=img_w, img_height=img_h,
+                           raw_detections=detections), False
 
     # Check uncertain band — only defer to Gemini if the model saw *something*
     gemini_floor = max(0.0, config.conf_threshold - 0.3)
@@ -353,12 +372,14 @@ def _process_roboflow_phase(
             "  -> %d uncertain detections (>=%.2f) — deferring to Gemini",
             len(uncertain), gemini_floor,
         )
-        return ImageResult(image_path=image_path), True
+        return ImageResult(image_path=image_path, img_width=img_w, img_height=img_h,
+                           raw_detections=detections), True
 
     logger.debug("  -> No detections above %.2f — deleting", gemini_floor)
     image_path.unlink(missing_ok=True)
     stats.deleted += 1
-    return ImageResult(image_path=image_path, not_found=True), False
+    return ImageResult(image_path=image_path, not_found=True, img_width=img_w, img_height=img_h,
+                       raw_detections=detections), False
 
 
 # -----------------------------------------------------------------------
@@ -391,3 +412,118 @@ def _apply_gemini_outcome(
     logger.debug("  Gemini empty response — skipping (%s)", image_path.name)
     stats.skipped_error += 1
     return ImageResult(image_path=image_path)
+
+
+# -----------------------------------------------------------------------
+# Restart re-filtering (avoids full pipeline re-run)
+# -----------------------------------------------------------------------
+
+def refilter_results(
+    previous_results: list[ImageResult],
+    new_threshold: float,
+    gemini_api_key: str = "",
+    prompt: str = "",
+    on_progress: Callable[[str, dict], None] | None = None,
+) -> tuple[BatchStats, list[ImageResult]]:
+    """Re-filter cached raw detections at a new threshold.
+
+    Avoids re-running model discovery, download, and YOLO inference.
+    Only calls Gemini for images that newly fall into the uncertain band.
+    """
+    def _emit(step: str, **data: object) -> None:
+        if on_progress:
+            on_progress(step, data)
+
+    stats = BatchStats()
+    stats.mode = "refilter"
+    results: list[ImageResult] = []
+    pending_gemini: list[tuple[int, Path]] = []
+    gemini_floor = max(0.0, new_threshold - 0.3)
+
+    _emit("inference", message="Re-filtering at new threshold", current=0,
+          total=len(previous_results))
+
+    for idx, prev in enumerate(previous_results):
+        stats.total += 1
+        _emit("inference", message="Re-filtering", current=idx + 1,
+              total=len(previous_results))
+
+        # Gemini-labeled or already not_found — keep as-is
+        if prev.source == "gemini" or prev.not_found or prev.error:
+            results.append(prev)
+            if prev.source == "gemini" and prev.boxes:
+                stats.labeled += 1
+                stats.gemini_labeled += 1
+            elif prev.not_found:
+                stats.deleted += 1
+            elif prev.error:
+                stats.skipped_error += 1
+            continue
+
+        # No raw detections stored (e.g., Gemini-only mode) — keep as-is
+        if not prev.raw_detections:
+            results.append(prev)
+            if prev.boxes:
+                stats.labeled += 1
+            continue
+
+        # Re-filter raw detections at new threshold
+        filtered = [d for d in prev.raw_detections if d.confidence >= new_threshold]
+
+        if filtered:
+            boxes = [
+                normalize_box(
+                    d.x_center_px, d.y_center_px, d.width_px, d.height_px,
+                    prev.img_width, prev.img_height, d.class_id,
+                )
+                for d in filtered
+            ]
+            stats.labeled += 1
+            stats.roboflow_labeled += 1
+            results.append(ImageResult(
+                image_path=prev.image_path, boxes=boxes, source="roboflow",
+                img_width=prev.img_width, img_height=prev.img_height,
+                raw_detections=prev.raw_detections,
+            ))
+            continue
+
+        # Check uncertain band
+        uncertain = [d for d in prev.raw_detections if d.confidence >= gemini_floor]
+        if uncertain:
+            results.append(ImageResult(
+                image_path=prev.image_path,
+                img_width=prev.img_width, img_height=prev.img_height,
+                raw_detections=prev.raw_detections,
+            ))
+            pending_gemini.append((len(results) - 1, prev.image_path))
+            continue
+
+        # Below floor — delete
+        prev.image_path.unlink(missing_ok=True)
+        stats.deleted += 1
+        results.append(ImageResult(
+            image_path=prev.image_path, not_found=True,
+            img_width=prev.img_width, img_height=prev.img_height,
+            raw_detections=prev.raw_detections,
+        ))
+
+    # Batch Gemini for newly-uncertain images
+    if pending_gemini and gemini_api_key:
+        gemini = GeminiClient(gemini_api_key)
+        gemini_paths = [path for _, path in pending_gemini]
+        _emit("gemini_batch", message=f"Labeling {len(gemini_paths)} images with Gemini",
+              current=0, total=len(gemini_paths))
+
+        def _on_result(done: int, total: int, path: Path, outcome: "GeminiOutcome") -> None:
+            _emit("gemini_batch", message="Labeling images with Gemini",
+                  current=done, total=total)
+
+        outcomes = gemini.label_images_batch(gemini_paths, prompt, on_result=_on_result)
+
+        for result_idx, image_path in pending_gemini:
+            outcome = outcomes[image_path]
+            results[result_idx] = _apply_gemini_outcome(image_path, outcome, stats)
+
+    stats.log_summary()
+    _emit("done", message="Pipeline complete", labeled=stats.labeled, total=stats.total)
+    return stats, results
