@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .config import PipelineConfig
 from .pipeline import run_pipeline
+from .yolo import write_label_file
 
 
 def main() -> None:
@@ -96,7 +97,16 @@ def main() -> None:
         )
 
     try:
-        stats = run_pipeline(config)
+        stats, results = run_pipeline(config)
+
+        # CLI mode: write labels to disk so upload can find them
+        config.labels_dir.mkdir(parents=True, exist_ok=True)
+        for result in results:
+            if result.boxes and not result.not_found:
+                label_path = config.labels_dir / f"{result.image_path.stem}.txt"
+                write_label_file(label_path, result.boxes)
+            elif result.not_found:
+                result.image_path.unlink(missing_ok=True)
 
         if config.upload_project and stats.labeled > 0:
             from .upload import upload_to_roboflow

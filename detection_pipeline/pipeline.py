@@ -1,28 +1,44 @@
 """Main pipeline orchestration.
 
-End-to-end flow per spec sections 4-8:
+End-to-end flow:
   1. Optional Gemini query expansion
   2. Roboflow discovery → select one model
   3. Download / cache model
   4. Per-image: local inference → threshold → Gemini fallback
-  5. Filesystem writes (labels) and deletes (OBJECT NOT FOUND)
+  5. Return structured results (images + labels) — caller controls upload
   6. Batch-end model cleanup
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import PipelineConfig
 from .discovery import DiscoveredModel, discover_model, normalize_query
 from .gemini_client import GeminiClient, GeminiOutcome
 from .local_inference import LocalModel
-from .yolo import YoloBox, normalize_box, write_label_file
+from .yolo import YoloBox, normalize_box
 
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"})
+
+
+# -----------------------------------------------------------------------
+# Per-image result
+# -----------------------------------------------------------------------
+
+@dataclass
+class ImageResult:
+    """Detection result for a single image — returned to caller."""
+
+    image_path: Path
+    boxes: list[YoloBox] = field(default_factory=list)
+    source: str = ""  # "roboflow", "gemini", or ""
+    not_found: bool = False  # Gemini said OBJECT NOT FOUND
+    error: str = ""  # non-empty if processing failed
 
 
 # -----------------------------------------------------------------------
@@ -59,9 +75,15 @@ class BatchStats:
 # Top-level entry point
 # -----------------------------------------------------------------------
 
-def run_pipeline(config: PipelineConfig) -> BatchStats:
-    """Execute the full detection-labeling pipeline."""
+def run_pipeline(config: PipelineConfig) -> tuple[BatchStats, list[ImageResult]]:
+    """Execute the full detection-labeling pipeline.
+
+    Returns (stats, results) where results is a list of ImageResult
+    containing each image path and its detected boxes. The caller
+    is responsible for writing labels and uploading.
+    """
     stats = BatchStats()
+    results: list[ImageResult] = []
 
     # --- validate inputs ---
     if not config.images_dir.is_dir():
@@ -75,10 +97,9 @@ def run_pipeline(config: PipelineConfig) -> BatchStats:
 
     if not images:
         logger.warning("No images found in %s", config.images_dir)
-        return stats
+        return stats, results
 
     logger.info("Found %d images in %s", len(images), config.images_dir)
-    config.labels_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Gemini client (if configured) ---
     gemini: GeminiClient | None = None
@@ -138,12 +159,15 @@ def run_pipeline(config: PipelineConfig) -> BatchStats:
             logger.info("[%d/%d] %s", idx, stats.total, image_path.name)
 
             if local_model is not None and model_info is not None:
-                _process_with_roboflow(image_path, config, local_model, model_info, gemini, stats)
+                result = _process_with_roboflow(image_path, config, local_model, model_info, gemini, stats)
             elif gemini is not None:
-                _process_gemini_only(image_path, config, gemini, stats)
+                result = _process_gemini_only(image_path, config, gemini, stats)
             else:
                 logger.error("  No model and no Gemini — skipping")
                 stats.skipped_error += 1
+                result = ImageResult(image_path=image_path, error="No model and no Gemini")
+
+            results.append(result)
     finally:
         # --- Step 5: batch-end cleanup (§4.2) ---
         if local_model is not None:
@@ -154,7 +178,7 @@ def run_pipeline(config: PipelineConfig) -> BatchStats:
                 local_model.cleanup()
 
     stats.log_summary()
-    return stats
+    return stats, results
 
 
 # -----------------------------------------------------------------------
@@ -168,16 +192,14 @@ def _process_with_roboflow(
     model_info: DiscoveredModel,
     gemini: GeminiClient | None,
     stats: BatchStats,
-) -> None:
+) -> ImageResult:
     """Roboflow local inference → threshold → optional Gemini fallback."""
-    label_path = config.labels_dir / f"{image_path.stem}.txt"
-
     try:
         detections, img_w, img_h = model.predict(image_path)
     except RuntimeError as exc:
         logger.warning("  Inference error: %s — skipping", exc)
         stats.skipped_error += 1
-        return
+        return ImageResult(image_path=image_path, error=str(exc))
 
     raw_count = len(detections)
     filtered = [d for d in detections if d.confidence >= config.conf_threshold]
@@ -194,16 +216,17 @@ def _process_with_roboflow(
             )
             for d in filtered
         ]
-        write_label_file(label_path, boxes)
-        logger.info("  -> Wrote %d labels to %s", len(boxes), label_path.name)
+        logger.info("  -> %d detections from Roboflow", len(boxes))
         stats.labeled += 1
         stats.roboflow_labeled += 1
+        return ImageResult(image_path=image_path, boxes=boxes, source="roboflow")
     elif gemini is not None:
         logger.info("  -> No detections after threshold — calling Gemini")
-        _handle_gemini(image_path, label_path, config.prompt, gemini, stats)
+        return _handle_gemini(image_path, config.prompt, gemini, stats)
     else:
         logger.info("  -> No detections and Gemini not configured — skipping")
         stats.skipped_error += 1
+        return ImageResult(image_path=image_path)
 
 
 def _process_gemini_only(
@@ -211,10 +234,9 @@ def _process_gemini_only(
     config: PipelineConfig,
     gemini: GeminiClient,
     stats: BatchStats,
-) -> None:
+) -> ImageResult:
     """Gemini-only path (no Roboflow model available for this batch)."""
-    label_path = config.labels_dir / f"{image_path.stem}.txt"
-    _handle_gemini(image_path, label_path, config.prompt, gemini, stats)
+    return _handle_gemini(image_path, config.prompt, gemini, stats)
 
 
 # -----------------------------------------------------------------------
@@ -223,49 +245,31 @@ def _process_gemini_only(
 
 def _handle_gemini(
     image_path: Path,
-    label_path: Path,
     prompt: str,
     gemini: GeminiClient,
     stats: BatchStats,
-) -> None:
-    """Call Gemini, then: write labels | delete image | skip on error."""
+) -> ImageResult:
+    """Call Gemini and return an ImageResult (no filesystem side-effects)."""
     stats.gemini_calls += 1
     outcome = gemini.label_image(image_path, prompt)
 
     if outcome.error:
-        # §7.1 — non-destructive
-        logger.warning("  Gemini error: %s — skipping (no delete)", outcome.error)
+        logger.warning("  Gemini error: %s — skipping", outcome.error)
         stats.skipped_error += 1
+        return ImageResult(image_path=image_path, error=outcome.error)
 
     elif outcome.not_found:
-        # §6 — OBJECT NOT FOUND → delete image + label
-        logger.info("  Gemini: OBJECT NOT FOUND — deleting image and label")
-        _delete_image_and_label(image_path, label_path)
+        logger.info("  Gemini: OBJECT NOT FOUND")
         stats.deleted += 1
+        return ImageResult(image_path=image_path, not_found=True)
 
     elif outcome.has_detections:
-        # Write all Gemini lines verbatim (no further confidence filtering)
-        write_label_file(label_path, outcome.boxes)
-        logger.info("  Gemini: wrote %d labels to %s", len(outcome.boxes), label_path.name)
+        logger.info("  Gemini: %d detections", len(outcome.boxes))
         stats.labeled += 1
         stats.gemini_labeled += 1
+        return ImageResult(image_path=image_path, boxes=outcome.boxes, source="gemini")
 
     else:
         logger.warning("  Gemini returned empty detections — skipping")
         stats.skipped_error += 1
-
-
-def _delete_image_and_label(image_path: Path, label_path: Path) -> None:
-    """Delete image and its matching label file (§6)."""
-    try:
-        image_path.unlink()
-        logger.info("    Deleted image: %s", image_path.name)
-    except OSError as exc:
-        logger.error("    Failed to delete image %s: %s", image_path.name, exc)
-
-    if label_path.exists():
-        try:
-            label_path.unlink()
-            logger.info("    Deleted label: %s", label_path.name)
-        except OSError as exc:
-            logger.error("    Failed to delete label %s: %s", label_path.name, exc)
+        return ImageResult(image_path=image_path)
