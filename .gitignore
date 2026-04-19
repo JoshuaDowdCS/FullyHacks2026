@@ -12,6 +12,9 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Logs
+.logs/
+
 # Project
 .cache/
 dataset/
@@ -27,6 +30,7 @@ unclean_images/
 # Frontend
 ui/node_modules/
 ui/dist/
+ui/.vite/
 
 # OS
 .DS_Store
