@@ -88,3 +88,56 @@ User types a prompt (e.g. "basketball")
 - Transparent scoring systems (showing judges your own math, not just "we used AI") make the technical depth visible even when the final UX looks simple.
 - Multi-system orchestration (Roboflow discovery + local inference + Gemini fallback) is more robust than relying on any single service, and the fallback chain itself is a demonstrable engineering decision.
 - Streaming progress feedback (SSE) transforms a batch process from "loading spinner for 2 minutes" into a visible, trustworthy pipeline.
+
+---
+
+> **v2 — 2026-04-19**
+
+## What changed
+
+Added multi-source image acquisition so users no longer need to bring their own images.
+
+## New features
+
+### Image Acquisition Pipeline
+
+Users now choose an image source from the home screen before running detection:
+
+```
+User types a prompt and picks a source
+  │
+  ├─ Existing images ── Use what's already in dataset/images/
+  │
+  ├─ Web scraping ───── icrawler across 4 engines (Bing, Baidu, Google, Open Images)
+  │       └─ Gemini bootstraps topic spec (search queries, COCO classes, distractors)
+  │       └─ Dedup: byte hash → perceptual hash (imagehash) → CLIP semantic filtering
+  │       └─ Streamed progress via SSE
+  │
+  └─ YouTube frames ── yt-dlp search + ffmpeg frame extraction at 1fps
+          └─ Metadata heuristics: filter by duration, exclude livestreams/shorts
+          └─ Gemini scores video title+description for relevance
+          └─ Same dedup pipeline as web scraping
+```
+
+### Key Technical Details
+
+- **Multi-source image acquisition:** Web scraping uses icrawler across four engines with CLIP-based deduplication to filter scene distractors. YouTube acquisition uses yt-dlp to search and download videos, then ffmpeg extracts frames at 1fps with byte + perceptual hash dedup. Both paths stream progress via SSE so the UI updates in real-time. The topic bootstrap (Gemini call → search queries, COCO class matching, distractor descriptions) is shared between both scrapers.
+
+- **Layered deduplication:** Byte-identical hashes catch exact copies, perceptual hashing (imagehash) catches near-duplicates (re-encoded, slightly cropped), and CLIP embeddings filter semantic duplicates — scene distractors that happen to contain the target object.
+
+### Updated tech stack
+
+| Layer | Technology |
+|-------|-----------|
+| Web scraping | icrawler (Bing, Baidu, Google, Open Images) |
+| Video frames | yt-dlp + ffmpeg |
+| Deduplication | imagehash (perceptual) + CLIP (semantic) |
+| Testing | pytest (73 tests across 5 modules) |
+
+## New challenges
+
+- **Image deduplication at scale:** Web scraping across four engines and YouTube frame extraction at 1fps both generate heavy duplicates. Byte-identical hashes catch exact copies, but near-duplicates (re-encoded, slightly cropped) required perceptual hashing. For semantic deduplication — filtering scene distractors — we use CLIP embeddings to remove images too similar to known distractor descriptions.
+
+## What we learned
+
+- Multi-source data acquisition (web scraping + YouTube frames) with layered deduplication (byte hash → perceptual hash → CLIP embeddings) gives users flexible starting points without drowning in duplicates.

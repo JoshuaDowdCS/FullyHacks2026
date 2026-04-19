@@ -295,11 +295,7 @@ export default function App() {
             <HomeScreen onLaunch={handleLaunch} />
           )}
 
-          {phase === "acquiring" && (
-            <RunProgress event={runProgress} confThreshold={confThreshold} />
-          )}
-
-          {phase === "running" && (
+          {(phase === "acquiring" || phase === "running") && (
             <RunProgress event={runProgress} confThreshold={confThreshold} />
           )}
 

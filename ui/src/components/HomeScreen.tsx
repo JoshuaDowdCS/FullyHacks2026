@@ -174,7 +174,7 @@ export default function HomeScreen({ onLaunch }: HomeScreenProps) {
               <input
                 type="number"
                 min={10}
-                max={1000}
+                max={10000000}
                 step={10}
                 value={imageCount}
                 onChange={(e) => {

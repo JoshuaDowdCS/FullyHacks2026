@@ -212,6 +212,7 @@ def run_pipeline(
 
     stats.total = len(images)
     logger.info("Found %d images in %s", len(images), config.images_dir)
+    _emit("inference", message=f"Found {len(images)} images to process")
 
     # --- Gemini client (if configured) ---
     gemini: GeminiClient | None = None
@@ -236,8 +237,13 @@ def run_pipeline(
                 search_query, config.roboflow_api_key,
                 bypass_cache=config.refresh_model,
             )
+            if candidates:
+                _emit("discovery", message=f"Found {len(candidates)} candidate model(s)")
+            else:
+                _emit("discovery", message="No models found on Roboflow")
         except Exception as exc:
             logger.error("Roboflow discovery failed: %s", exc)
+            _emit("discovery", message=f"Roboflow discovery failed: {exc}")
             if not config.gemini_configured:
                 raise RuntimeError(
                     "Roboflow discovery failed and Gemini is not configured — aborting"
@@ -255,6 +261,7 @@ def run_pipeline(
             local_model.load(force_download=config.refresh_model)
             model_info = candidate
             stats.mode = f"Roboflow+local ({candidate.model_id})"
+            _emit("download", message=f"Model ready: {candidate.model_id}")
             break
         except RuntimeError as exc:
             logger.warning("Model %s failed to load: %s — trying next", candidate.model_id, exc)
@@ -271,6 +278,7 @@ def run_pipeline(
             if model_info is None
             else "Gemini-only (model load failed)"
         )
+        _emit("download", message=f"Falling back to {stats.mode}")
         logger.info("Running in %s", stats.mode)
 
     # --- Step 4a: per-image Roboflow inference (or flag for Gemini) ---
@@ -302,6 +310,9 @@ def run_pipeline(
                 f"  YOLO  {progress._bar(idx, stats.total)}  {idx}/{stats.total}  "
                 f"labeled: {stats.roboflow_labeled}  → gemini: {len(pending_gemini)}  skip: {stats.skipped_error}"
             )
+
+        # Emit inference summary
+        _emit("inference", message=f"Inference done: {stats.roboflow_labeled} labeled, {len(pending_gemini)} uncertain, {stats.deleted} removed")
 
         # --- Step 4b: batch Gemini calls (concurrent) ---
         if pending_gemini and gemini is not None:
@@ -339,6 +350,8 @@ def run_pipeline(
             for result_idx, image_path in pending_gemini:
                 outcome = outcomes[image_path]
                 results[result_idx] = _apply_gemini_outcome(image_path, outcome, stats)
+
+            _emit("gemini_batch", message=f"Gemini done: {g_counts['labeled']} labeled, {g_counts['absent']} absent, {g_counts['err']} errors")
 
     finally:
         # --- Step 5: batch-end cleanup (§4.2) ---

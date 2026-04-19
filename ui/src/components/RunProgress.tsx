@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import type { PipelineEvent } from "../api";
 
@@ -6,10 +7,18 @@ interface RunProgressProps {
   confThreshold: number;
 }
 
+interface LogEntry {
+  id: number;
+  time: string;
+  message: string;
+  step: string;
+}
+
 const STEP_LABELS: Record<string, string> = {
   discovery: "DISCOVERING MODEL",
   download: "DOWNLOADING MODEL",
   inference: "PROCESSING IMAGES",
+  gemini_batch: "GEMINI VERIFICATION",
   done: "COMPLETE",
   error: "ERROR",
   // Acquisition steps
@@ -30,14 +39,21 @@ const STEP_DETAILS: Record<string, string> = {
   bootstrap: "Analyzing topic with Gemini...",
 };
 
+function stepColor(step: string): string {
+  if (step === "error") return "#FF4D8E";
+  if (step === "done") return "#2AFFA0";
+  return "rgba(255,255,255,0.55)";
+}
+
 export default function RunProgress({ event, confThreshold }: RunProgressProps) {
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const idRef = useRef(0);
+  const lastKeyRef = useRef("");
+
   const step = event?.step ?? "discovery";
   const label = STEP_LABELS[step] ?? step.toUpperCase();
   const hasProgress = event?.current != null && event?.total;
-  // Show the shimmer for any step without determinate progress, except the
-  // terminal states. This way long phases like "crawling" and "filtering"
-  // that don't emit current/total still animate instead of showing a stuck
-  // empty bar.
   const isTerminal = step === "done" || step === "error";
   const isIndeterminate = !hasProgress && !isTerminal;
   const progress = hasProgress
@@ -47,9 +63,35 @@ export default function RunProgress({ event, confThreshold }: RunProgressProps) 
     ? `${event.current} of ${event.total}`
     : STEP_DETAILS[step] ?? event?.message ?? "";
 
+  // Accumulate log entries — deduplicate same step+message combos (progress ticks)
+  useEffect(() => {
+    if (!event) return;
+    const msg = event.message || STEP_DETAILS[event.step] || "";
+    if (!msg) return;
+
+    const key = `${event.step}:${msg}`;
+    if (key === lastKeyRef.current) return;
+    lastKeyRef.current = key;
+
+    setLog((prev) => [
+      ...prev,
+      {
+        id: idRef.current++,
+        time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+        message: msg,
+        step: event.step,
+      },
+    ]);
+  }, [event]);
+
+  // Auto-scroll log
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [log]);
+
   return (
     <motion.div
-      className="relative w-[460px] max-w-[90vw] rounded-2xl p-12"
+      className="relative w-[520px] max-w-[90vw] rounded-2xl p-12"
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.4 }}
@@ -118,6 +160,40 @@ export default function RunProgress({ event, confThreshold }: RunProgressProps) 
         {detail}
       </p>
 
+      {/* Activity log */}
+      {log.length > 0 && (
+        <div
+          className="mt-6 max-h-[220px] overflow-y-auto activity-log"
+          style={{
+            background: "rgba(2,8,16,0.5)",
+            border: "1px solid rgba(76,224,210,0.08)",
+            borderRadius: "8px",
+            padding: "8px 12px",
+          }}
+        >
+          {log.map((entry) => (
+            <motion.div
+              key={entry.id}
+              className="flex gap-2.5 py-[3px]"
+              initial={{ opacity: 0, x: -6 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <span className="font-mono text-[9px] leading-[18px] text-text-dim whitespace-nowrap shrink-0">
+                {entry.time}
+              </span>
+              <span
+                className="font-mono text-[10px] leading-[18px]"
+                style={{ color: stepColor(entry.step) }}
+              >
+                {entry.message}
+              </span>
+            </motion.div>
+          ))}
+          <div ref={logEndRef} />
+        </div>
+      )}
+
       {/* Pulsing indicator */}
       {step !== "done" && step !== "error" && (
         <div className="flex justify-center mt-8">
@@ -144,6 +220,16 @@ export default function RunProgress({ event, confThreshold }: RunProgressProps) 
         @keyframes shimmer {
           0% { background-position: 200% 0; }
           100% { background-position: -200% 0; }
+        }
+        .activity-log::-webkit-scrollbar {
+          width: 4px;
+        }
+        .activity-log::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .activity-log::-webkit-scrollbar-thumb {
+          background: rgba(76,224,210,0.15);
+          border-radius: 2px;
         }
       `}</style>
     </motion.div>
