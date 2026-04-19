@@ -17,3 +17,4 @@ ui/dist/
 
 # OS
 .DS_Store
+*.zip
