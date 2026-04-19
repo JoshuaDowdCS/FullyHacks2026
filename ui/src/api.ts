@@ -86,7 +86,7 @@ export async function uploadToRoboflow(): Promise<UploadResponse> {
 export type ImageSource =
   | { type: "existing" }
   | { type: "web"; count: number }
-  | { type: "youtube"; url: string; maxVideos: number };
+  | { type: "youtube"; maxVideos: number; url?: string };
 
 // ── SSE Pipeline Events ──
 
@@ -162,7 +162,13 @@ export function acquireImages(
   const endpoint = source.type === "youtube" ? "/api/acquire/youtube" : "/api/acquire/web";
   const body =
     source.type === "youtube"
-      ? { prompt, youtube_url: source.url, max_videos: source.maxVideos }
+      ? {
+          prompt,
+          max_videos: source.maxVideos,
+          // Only include the URL field if the user actually pasted one;
+          // omit it entirely when they want search-based discovery.
+          ...(source.url ? { youtube_url: source.url } : {}),
+        }
       : { prompt, count: source.count };
 
   fetch(endpoint, {

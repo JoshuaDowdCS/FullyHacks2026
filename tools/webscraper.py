@@ -1170,7 +1170,7 @@ def run_scraper(
             on_progress(step, {"message": kwargs.get("message", ""), **kwargs})
 
     if engines is None:
-        engines = ["bing"]
+        engines = ["bing", "baidu", "openimages"]
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1186,20 +1186,36 @@ def run_scraper(
         _emit("error", message=f"Topic '{query}' classified as {spec.type!r} — not an object.")
         return 0
 
-    # Crawl
+    # Crawl. `count` is the USER'S TARGET verified output — the number of
+    # images we want to end up with after BOTH the scraper filter cascade
+    # AND the downstream detection pipeline (which re-filters with Roboflow
+    # at conf 0.7 and keeps only images with confident bounding boxes).
+    # Combined loss rate is ~90%+, so over-fetch aggressively.
+    RAW_MULTIPLIER = 10
+    raw_target = count * RAW_MULTIPLIER
+
     icrawler_engines = [e for e in engines if e in ENGINES]
     use_openimages = "openimages" in engines
 
     if use_openimages and spec and spec.open_images_class:
-        _emit("crawling", message="Crawling Open Images Dataset...")
-        openimages_crawl(out_dir, spec.open_images_class, max_samples=5000)
+        # OID images are pre-labeled so survive filters at ~60-70%. Ask for
+        # roughly 2x the target from OID alone as a conservative floor.
+        oi_target = max(count * 2, 200)
+        _emit("crawling", message=f"Crawling Open Images Dataset ({oi_target} samples)...")
+        openimages_crawl(out_dir, spec.open_images_class, max_samples=oi_target)
 
     queries = resolve_queries(query, None, expand=True, spec=spec)
     n_jobs = len(icrawler_engines) * len(queries)
-    per_query = max(1, count // n_jobs) if n_jobs > 0 else 50
+    # Spread the raw target across jobs; floor at 5 per query so small
+    # targets still have enough breadth to hit diverse results.
+    per_query = max(5, raw_target // n_jobs) if n_jobs > 0 else 50
 
     if icrawler_engines:
-        _emit("crawling", message=f"Crawling {n_jobs} jobs ({count} images target)...")
+        _emit("crawling", message=(
+            f"Crawling {n_jobs} jobs "
+            f"(~{per_query}/query × {n_jobs} = {per_query * n_jobs} attempts; "
+            f"target {count} verified)..."
+        ))
         crawl_jobs(out_dir, icrawler_engines, queries, per_query, out_dir / ".done.txt", workers=4, downloader_threads=4)
 
     # Dedup

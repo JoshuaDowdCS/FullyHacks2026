@@ -66,5 +66,7 @@ class AcquireWebRequest(BaseModel):
 
 class AcquireYouTubeRequest(BaseModel):
     prompt: str
-    youtube_url: str
+    # Optional: if provided, that single video is downloaded + extracted.
+    # If empty/None, we search YouTube for the top videos on the prompt.
+    youtube_url: str | None = None
     max_videos: int = 5

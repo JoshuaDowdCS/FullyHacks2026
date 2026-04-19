@@ -136,9 +136,29 @@ def run_pipeline(
     if not config.images_dir.is_dir():
         raise FileNotFoundError(f"Images directory not found: {config.images_dir}")
 
+    # Recover from a previous run that crashed between Pass 1 and Pass 2.
+    # If _tmp_XX.ext files are lying around, they ARE your data — don't
+    # delete them. Rename them to non-clashing names so the next two-pass
+    # rename handles them cleanly.
+    for stale in config.images_dir.glob("_tmp_*"):
+        if stale.is_file():
+            # Strip the `_tmp_` prefix so it re-enters the listing as a
+            # normal image. If the derived name already exists, append a
+            # suffix so we don't overwrite.
+            recovered = stale.with_name(stale.name.removeprefix("_tmp_"))
+            suffix = 1
+            while recovered.exists():
+                recovered = stale.with_name(f"rec_{suffix}_{stale.name.removeprefix('_tmp_')}")
+                suffix += 1
+            try:
+                stale.rename(recovered)
+            except OSError as exc:
+                logger.warning("Couldn't recover tmp file %s: %s", stale.name, exc)
+
     raw_images = sorted(
         p for p in config.images_dir.iterdir()
         if p.suffix.lower() in IMAGE_EXTENSIONS
+        and not p.name.startswith("_tmp_")  # belt-and-suspenders
     )
 
     if not raw_images:
@@ -158,21 +178,34 @@ def run_pipeline(
         images = list(raw_images)
         logger.debug("Images already sequentially named — skipping rename")
     else:
-        # Pass 1: move to temporary names so no target can collide with a source
+        # Pass 1: move to temporary names so no target can collide with a source.
+        # Use missing_ok semantics so a source file that vanished between
+        # listing and rename (e.g. from a concurrent UI keep/discard) doesn't
+        # crash the whole pipeline.
         tmp_paths: list[Path] = []
         for i, p in enumerate(raw_images, 1):
+            if not p.exists():
+                logger.warning("Source vanished before rename; skipping: %s", p.name)
+                continue
             tmp_name = f"_tmp_{i:0{width}}{p.suffix.lower()}"
             tmp_path = p.parent / tmp_name
-            p.rename(tmp_path)
+            try:
+                p.rename(tmp_path)
+            except FileNotFoundError:
+                logger.warning("Race: %s disappeared mid-rename; skipping.", p.name)
+                continue
             tmp_paths.append(tmp_path)
         # Pass 2: move from temporary names to final sequential names
         renamed = 0
         for i, tmp in enumerate(tmp_paths, 1):
             clean_name = f"{i:0{width}}{tmp.suffix.lower()}"
             new_path = tmp.parent / clean_name
-            tmp.rename(new_path)
-            if raw_images[i - 1] != new_path:
-                renamed += 1
+            try:
+                tmp.rename(new_path)
+            except FileNotFoundError:
+                logger.warning("Race: %s disappeared mid-rename; skipping.", tmp.name)
+                continue
+            renamed += 1
             images.append(new_path)
         if renamed:
             logger.info("Renamed %d images → %s … %s", renamed, images[0].name, images[-1].name)

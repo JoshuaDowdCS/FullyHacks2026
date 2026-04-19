@@ -1,0 +1,12 @@
+
+> ui@0.0.0 dev
+> vite
+
+
+  VITE v8.0.8  ready in 171 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+3:29:14 PM [vite] (client) hmr update /src/components/HomeScreen.tsx, /src/index.css
+3:29:20 PM [vite] (client) hmr update /src/components/HomeScreen.tsx, /src/index.css
+3:29:25 PM [vite] (client) hmr update /src/components/HomeScreen.tsx, /src/index.css

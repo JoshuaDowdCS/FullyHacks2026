@@ -34,10 +34,11 @@ if [[ ! -f "$VENV/bin/python" ]]; then
   exit 1
 fi
 
-(cd "$SCRIPT_DIR" && "$VENV/bin/uvicorn" api.main:app --port 8001 --reload) &>/dev/null &
+(cd "$SCRIPT_DIR" && PYTHONUNBUFFERED=1 "$VENV/bin/uvicorn" api.main:app --port 8001 --reload) \
+  > "$SCRIPT_DIR/api.log" 2>&1 &
 API_PID=$!
 
-(cd "$SCRIPT_DIR/ui" && npm run dev) &>/dev/null &
+(cd "$SCRIPT_DIR/ui" && npm run dev) > "$SCRIPT_DIR/ui.log" 2>&1 &
 UI_PID=$!
 
 trap "kill $API_PID $UI_PID 2>/dev/null; echo 'Stopped.'" EXIT

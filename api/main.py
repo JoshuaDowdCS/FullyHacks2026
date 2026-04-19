@@ -86,6 +86,10 @@ class _UndoEntry:
 _undo_stack: list[_UndoEntry] = []
 _MAX_UNDO = 3
 
+# Guards against concurrent /api/run calls: two pipelines renaming the same
+# files at once shreds the dataset via the two-pass rename race.
+_pipeline_running: bool = False
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -166,10 +170,26 @@ def _build_image_info(result: ImageResult) -> ImageInfo:
 
 @app.get("/api/images", response_model=ImagesResponse)
 def list_images():
-    """List images with detections from the last pipeline run."""
+    """List images with detections from the last pipeline run.
+
+    Skips entries whose on-disk file has vanished (e.g. from a partial
+    rename crash in a previous run) so the UI never tries to render a
+    broken image tag."""
     global _keep_counter
     _keep_counter = 0  # reset on reload
-    labeled = [r for r in _pipeline_results.values() if r.boxes and not r.not_found]
+    labeled = [
+        r for r in _pipeline_results.values()
+        if r.boxes and not r.not_found and r.image_path.exists()
+    ]
+    # Also prune the dict so subsequent keep/discard don't reference ghosts.
+    stale = [
+        name for name, r in _pipeline_results.items()
+        if not r.image_path.exists()
+    ]
+    for name in stale:
+        _pipeline_results.pop(name, None)
+    if stale:
+        logger.warning("Pruned %d stale pipeline entries with missing files", len(stale))
     images = [_build_image_info(r) for r in labeled]
     return ImagesResponse(
         images=images,
@@ -353,7 +373,14 @@ def restart_pipeline():
 @app.post("/api/run")
 async def run(body: RunRequest):
     """Launch the pipeline and stream progress as SSE events."""
-    global _pipeline_results, _conf_threshold, _prompt, _config, _keep_counter
+    global _pipeline_results, _conf_threshold, _prompt, _config, _keep_counter, _pipeline_running
+
+    if _pipeline_running:
+        raise HTTPException(
+            status_code=409,
+            detail="A pipeline run is already in progress. Wait for it to finish.",
+        )
+    _pipeline_running = True
 
     # Reset server state
     _pipeline_results = {}
@@ -382,7 +409,7 @@ async def run(body: RunRequest):
         loop.call_soon_threadsafe(progress_queue.put_nowait, {"step": step, **data})
 
     async def run_in_thread() -> None:
-        global _pipeline_results
+        global _pipeline_results, _pipeline_running
         try:
             _stats, results = await asyncio.to_thread(
                 run_pipeline, _config, on_progress
@@ -399,6 +426,7 @@ async def run(body: RunRequest):
                 progress_queue.put_nowait, {"step": "error", "message": str(exc)}
             )
         finally:
+            _pipeline_running = False
             loop.call_soon_threadsafe(progress_queue.put_nowait, None)  # sentinel
 
     async def event_stream():
@@ -464,6 +492,10 @@ async def acquire_web(body: AcquireWebRequest):
     loop = asyncio.get_event_loop()
 
     def on_progress(step: str, data: dict) -> None:
+        # Swallow the scraper's own "done" — we emit our own after copy so the
+        # client sees exactly one terminal event (prevents double launch).
+        if step == "done":
+            return
         loop.call_soon_threadsafe(progress_queue.put_nowait, {"step": step, **data})
 
     async def run_in_thread() -> None:
@@ -533,6 +565,10 @@ async def acquire_youtube(body: AcquireYouTubeRequest):
     loop = asyncio.get_event_loop()
 
     def on_progress(step: str, data: dict) -> None:
+        # Swallow the scraper's own "done" — we emit our own after copy so the
+        # client sees exactly one terminal event (prevents double launch).
+        if step == "done":
+            return
         loop.call_soon_threadsafe(progress_queue.put_nowait, {"step": step, **data})
 
     async def run_in_thread() -> None:

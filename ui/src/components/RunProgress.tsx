@@ -33,8 +33,13 @@ const STEP_DETAILS: Record<string, string> = {
 export default function RunProgress({ event, confThreshold }: RunProgressProps) {
   const step = event?.step ?? "discovery";
   const label = STEP_LABELS[step] ?? step.toUpperCase();
-  const isIndeterminate = step === "discovery" || step === "download" || step === "bootstrap" || step === "dedup";
   const hasProgress = event?.current != null && event?.total;
+  // Show the shimmer for any step without determinate progress, except the
+  // terminal states. This way long phases like "crawling" and "filtering"
+  // that don't emit current/total still animate instead of showing a stuck
+  // empty bar.
+  const isTerminal = step === "done" || step === "error";
+  const isIndeterminate = !hasProgress && !isTerminal;
   const progress = hasProgress
     ? (event.current! / event.total!) * 100
     : step === "done" ? 100 : 0;
