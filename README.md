@@ -1,0 +1,1 @@
+I recommend using a virtual environment and installing the requirements.txt file in that virtual environment to utilize the gemini.py file.

@@ -1,0 +1,297 @@
+/* ═══ SEA CREATURE ACTION BUTTONS ═══ */
+
+/* ── ANGLERFISH (Discard) ── */
+.anglerfish {
+  width: 72px;
+  height: 56px;
+  position: relative;
+  filter: drop-shadow(0 0 15px rgba(255, 77, 142, 0.3));
+  animation: angler-idle 3s ease-in-out infinite;
+}
+@keyframes angler-idle {
+  0%, 100% { transform: rotate(-2deg) translateY(0); }
+  50% { transform: rotate(2deg) translateY(-3px); }
+}
+.angler-body {
+  position: absolute;
+  bottom: 0;
+  left: 10px;
+  width: 52px;
+  height: 36px;
+  background: radial-gradient(ellipse at 55% 40%, rgba(255,77,142,0.35), rgba(255,77,142,0.12) 60%, rgba(255,77,142,0.04));
+  border-radius: 60% 50% 50% 55%;
+  border: 1px solid rgba(255,77,142,0.2);
+}
+.angler-eye {
+  position: absolute;
+  top: 10px;
+  left: 32px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, rgba(255,77,142,0.9), rgba(255,77,142,0.4));
+  box-shadow: 0 0 6px rgba(255,77,142,0.5);
+}
+.angler-eye::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(255,200,220,0.9);
+}
+.angler-mouth {
+  position: absolute;
+  bottom: 6px;
+  left: 0;
+  width: 30px;
+  height: 10px;
+}
+.angler-teeth-top, .angler-teeth-bottom {
+  position: absolute;
+  left: 0;
+  display: flex;
+  gap: 2px;
+}
+.angler-teeth-top { top: 0; }
+.angler-teeth-bottom { bottom: 0; }
+.tooth {
+  width: 0;
+  height: 0;
+  border-left: 2px solid transparent;
+  border-right: 2px solid transparent;
+}
+.tooth-down { border-top: 5px solid rgba(255,77,142,0.6); }
+.tooth-up { border-bottom: 4px solid rgba(255,77,142,0.5); }
+.angler-lure {
+  position: absolute;
+  top: -4px;
+  left: 24px;
+  width: 1.5px;
+  height: 22px;
+  background: linear-gradient(0deg, rgba(255,77,142,0.3), rgba(255,77,142,0.1));
+  transform: rotate(30deg);
+  transform-origin: bottom center;
+  animation: lure-swing 2.5s ease-in-out infinite;
+}
+@keyframes lure-swing {
+  0%, 100% { transform: rotate(25deg); }
+  50% { transform: rotate(35deg); }
+}
+.angler-lure::after {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: -4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,77,142,0.8), rgba(255,77,142,0.2) 60%, transparent);
+  box-shadow: 0 0 12px rgba(255,77,142,0.6), 0 0 25px rgba(255,77,142,0.3);
+  animation: lure-glow 1.5s ease-in-out infinite;
+}
+@keyframes lure-glow {
+  0%, 100% { opacity: 0.6; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+.angler-fin {
+  position: absolute;
+  width: 0;
+  height: 0;
+  animation: fin-flap 2s ease-in-out infinite;
+}
+.angler-fin-top {
+  top: 4px;
+  left: 30px;
+  border-left: 8px solid rgba(255,77,142,0.2);
+  border-top: 4px solid transparent;
+  border-bottom: 2px solid transparent;
+  transform-origin: left center;
+}
+.angler-fin-back {
+  bottom: 8px;
+  right: -2px;
+  border-left: 10px solid rgba(255,77,142,0.15);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  transform-origin: left center;
+}
+@keyframes fin-flap {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(5deg); }
+}
+
+/* ── RESTART BUBBLE ── */
+.restart-bubble {
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, rgba(59,139,245,0.22), rgba(59,139,245,0.08) 50%, rgba(59,139,245,0.03));
+  border: 2px solid rgba(59,139,245,0.35);
+  box-shadow: 0 0 30px rgba(59,139,245,0.2), 0 0 60px rgba(59,139,245,0.08), inset 0 0 25px rgba(59,139,245,0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  animation: bubble-bob 4s ease-in-out infinite;
+}
+.restart-bubble::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: 14px;
+  width: 16px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.1);
+  transform: rotate(-20deg);
+}
+.restart-bubble::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(59,139,245,0.12);
+  animation: bubble-outer-pulse 3s ease-in-out infinite;
+}
+.restart-bubble-inner {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, rgba(59,139,245,0.15), transparent 60%);
+  border: 1px solid rgba(59,139,245,0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.restart-icon {
+  opacity: 1;
+  filter: drop-shadow(0 0 6px rgba(59,139,245,0.5));
+}
+@keyframes bubble-bob {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-6px) scale(1.04); }
+}
+@keyframes bubble-outer-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.08); }
+}
+
+/* ── SEA TURTLE (Keep) ── */
+.sea-turtle {
+  width: 80px;
+  height: 60px;
+  position: relative;
+  filter: drop-shadow(0 0 15px rgba(42,255,160,0.25));
+  animation: turtle-glide 5s ease-in-out infinite;
+}
+@keyframes turtle-glide {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  30% { transform: translateY(-4px) rotate(2deg); }
+  60% { transform: translateY(-2px) rotate(-1deg); }
+}
+.turtle-shell {
+  position: absolute;
+  top: 8px;
+  left: 16px;
+  width: 48px;
+  height: 36px;
+  background: radial-gradient(ellipse at 45% 40%, rgba(42,255,160,0.3), rgba(42,255,160,0.1) 55%, rgba(42,255,160,0.04));
+  border: 1.5px solid rgba(42,255,160,0.25);
+  border-radius: 50% 50% 45% 45%;
+}
+.shell-pattern {
+  position: absolute;
+  inset: 4px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+  gap: 2px;
+  padding: 2px;
+}
+.scute {
+  border: 1px solid rgba(42,255,160,0.12);
+  border-radius: 30%;
+  background: rgba(42,255,160,0.03);
+}
+.turtle-head {
+  position: absolute;
+  top: 16px;
+  left: -2px;
+  width: 18px;
+  height: 14px;
+  background: radial-gradient(ellipse at 60% 40%, rgba(42,255,160,0.25), rgba(42,255,160,0.08));
+  border-radius: 60% 30% 40% 50%;
+  border: 1px solid rgba(42,255,160,0.15);
+}
+.turtle-eye {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(42,255,160,0.8);
+  box-shadow: 0 0 4px rgba(42,255,160,0.5);
+}
+.turtle-eye::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: rgba(200,255,230,0.9);
+}
+.flipper {
+  position: absolute;
+  background: rgba(42,255,160,0.12);
+  border: 1px solid rgba(42,255,160,0.1);
+  animation: flipper-stroke 3s ease-in-out infinite;
+}
+@keyframes flipper-stroke {
+  0%, 100% { transform: rotate(-15deg); }
+  50% { transform: rotate(10deg); }
+}
+.flipper-tl {
+  top: 6px; left: 6px;
+  width: 22px; height: 8px;
+  border-radius: 80% 20% 60% 20%;
+  transform-origin: right bottom;
+}
+.flipper-bl {
+  bottom: 4px; left: 8px;
+  width: 18px; height: 7px;
+  border-radius: 20% 60% 20% 80%;
+  transform-origin: right top;
+  animation-delay: 0.4s;
+}
+.flipper-tr {
+  top: 8px; right: -8px;
+  width: 18px; height: 7px;
+  border-radius: 20% 80% 20% 60%;
+  transform-origin: left bottom;
+  animation-delay: 0.2s;
+  animation-direction: reverse;
+}
+.flipper-br {
+  bottom: 6px; right: -6px;
+  width: 16px; height: 6px;
+  border-radius: 60% 20% 80% 20%;
+  transform-origin: left top;
+  animation-delay: 0.6s;
+  animation-direction: reverse;
+}
+.turtle-tail {
+  position: absolute;
+  top: 20px;
+  right: -4px;
+  width: 0;
+  height: 0;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  border-left: 8px solid rgba(42,255,160,0.12);
+}
