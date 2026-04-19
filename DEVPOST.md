@@ -1,3 +1,4 @@
 # Devpost notes (accumulate as you build)
 
 - **2026-04-18:** Captured the batch **detection labeling** pipeline design (Roboflow discovery → **local** weights + inference → confidence gate → Gemini contract with `OBJECT NOT FOUND` deletions → YOLO `dataset/labels/`). Spec: `docs/superpowers/specs/2026-04-18-detection-labeling-pipeline-design.md`.
+- **2026-04-18:** Implemented `detection_pipeline` package — transparent **relevance-scored** Roboflow Universe discovery with hard filters, local inference via `inference` SDK, confidence gating (only Roboflow path), Gemini HTTP contract (YOLO lines vs `OBJECT NOT FOUND` sentinel), deterministic filesystem rules (write/delete/skip), and batch-end model cache cleanup. CLI: `python -m detection_pipeline --prompt "..."`. 58 unit+integration tests passing.
