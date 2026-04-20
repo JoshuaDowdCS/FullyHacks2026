@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 from .config import PipelineConfig
 from .pipeline import run_pipeline
-from .yolo import write_label_file
+from .yolo import write_classification_label, write_label_file
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--prompt", required=True,
-        help="What to detect (e.g. 'tennis balls', 'fire hydrant')",
+        help="What to detect or classify (e.g. 'tennis balls', 'fire hydrant')",
+    )
+    parser.add_argument(
+        "--task", choices=["detection", "classification"], default="detection",
+        help="Task type: 'detection' for bounding boxes, 'classification' for image-level labels (default: detection)",
     )
 
     # Image source
@@ -213,13 +217,15 @@ def main() -> None:
     if args.upload:
         from .discovery import normalize_query
         slug = normalize_query(args.prompt).replace(" ", "-")
-        upload_project = f"{slug}-detection" if slug else "detection-pipeline"
+        suffix = "classification" if args.task == "classification" else "detection"
+        upload_project = f"{slug}-{suffix}" if slug else f"{suffix}-pipeline"
 
     config = PipelineConfig(
         images_dir=pipeline_images_dir,
         labels_dir=args.labels_dir,
         prompt=args.prompt,
         conf_threshold=args.conf_threshold,
+        task_type=args.task,
         refresh_model=args.refresh_model,
         keep_model_cache=args.keep_model_cache,
         expand_query_with_gemini=bool(args.expand_query_with_gemini),
@@ -242,17 +248,21 @@ def main() -> None:
         config.labels_dir.mkdir(parents=True, exist_ok=True)
 
         for result in results:
-            if result.boxes and not result.not_found:
+            has_label = result.boxes or result.is_classified
+            if has_label and not result.not_found:
                 # Copy verified image from unclean_images/ → dataset/images/
                 if scraped:
                     shutil.copy2(result.image_path, output_images_dir / result.image_path.name)
                 label_path = config.labels_dir / f"{result.image_path.stem}.txt"
-                write_label_file(label_path, result.boxes)
+                if result.boxes:
+                    write_label_file(label_path, result.boxes)
+                elif result.is_classified:
+                    write_classification_label(label_path, result.class_id)
             elif result.not_found:
                 result.image_path.unlink(missing_ok=True)
 
         if scraped:
-            clean_count = sum(1 for r in results if r.boxes and not r.not_found)
+            clean_count = sum(1 for r in results if (r.boxes or r.is_classified) and not r.not_found)
             logger.info(
                 "Moved %d clean images from %s → %s",
                 clean_count, UNCLEAN_DIR, output_images_dir,
@@ -261,11 +271,16 @@ def main() -> None:
         # --- Step 4: Upload (if requested) ---
         if config.upload_project and stats.labeled > 0:
             from .upload import upload_to_roboflow
+            rf_project_type = (
+                "single-label-classification" if config.task_type == "classification"
+                else "object-detection"
+            )
             upload_to_roboflow(
                 images_dir=output_images_dir,
                 labels_dir=config.labels_dir,
                 api_key=config.roboflow_api_key,
                 project_name=config.upload_project,
+                project_type=rf_project_type,
             )
 
         sys.exit(0 if stats.labeled > 0 else 1)

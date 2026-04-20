@@ -34,6 +34,14 @@ Coordinates must be integers between 0 and 1000 relative to image dimensions.
 Do NOT include any labels, class names, or explanation — only bounding box lines.
 """
 
+CLASSIFY_PROMPT_TEMPLATE = """Classify this image: does it contain {item}?
+
+If the object is NOT present, respond with exactly: OBJECT NOT FOUND
+
+If it IS present, respond with exactly: YES
+Do NOT include any explanation — only YES or OBJECT NOT FOUND.
+"""
+
 EXPAND_QUERY_PROMPT = (
     "Rewrite the following into a short Roboflow Universe search query (2-4 words). "
     "Return ONLY the query, nothing else.\n\n"
@@ -42,21 +50,28 @@ EXPAND_QUERY_PROMPT = (
 
 @dataclass
 class GeminiOutcome:
-    """Result of a single Gemini labeling call."""
+    """Result of a single Gemini labeling/classification call."""
 
     boxes: list[YoloBox] = field(default_factory=list)
     not_found: bool = False
     error: str | None = None
+    classified_as: int | None = None  # class_id for classification tasks
 
     @property
     def has_detections(self) -> bool:
         return bool(self.boxes)
+
+    @property
+    def has_classification(self) -> bool:
+        return self.classified_as is not None
 
     def __repr__(self) -> str:
         if self.error:
             return f"GeminiOutcome(error={self.error!r})"
         if self.not_found:
             return "GeminiOutcome(OBJECT_NOT_FOUND)"
+        if self.classified_as is not None:
+            return f"GeminiOutcome(class={self.classified_as})"
         return f"GeminiOutcome(boxes={len(self.boxes)})"
 
 
@@ -128,6 +143,84 @@ class GeminiClient:
             return GeminiOutcome(error=f"Gemini API error: {exc}")
 
         return self._parse_text(text)
+
+    # ------------------------------------------------------------------
+    # Per-image classification
+    # ------------------------------------------------------------------
+
+    def classify_image(self, image_path: Path, prompt: str) -> GeminiOutcome:
+        """Send *image_path* to Gemini for binary classification."""
+        try:
+            image = Image.open(image_path)
+        except IOError as exc:
+            return GeminiOutcome(error=f"Cannot read image: {exc}")
+
+        w, h = image.size
+        if max(w, h) > self._MAX_GEMINI_PX:
+            scale = self._MAX_GEMINI_PX / max(w, h)
+            image = image.resize(
+                (int(w * scale), int(h * scale)), Image.LANCZOS,
+            )
+
+        classify_prompt = CLASSIFY_PROMPT_TEMPLATE.format(item=prompt)
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[classify_prompt, image],
+                config=self._no_thinking,
+            )
+            text = response.candidates[0].content.parts[0].text.strip()
+        except Exception as exc:
+            return GeminiOutcome(error=f"Gemini API error: {exc}")
+
+        return self._parse_classification_text(text)
+
+    def _parse_classification_text(self, text: str) -> GeminiOutcome:
+        if not text:
+            return GeminiOutcome(error="Empty response from Gemini")
+
+        if OBJECT_NOT_FOUND_SENTINEL in text.upper():
+            return GeminiOutcome(not_found=True)
+
+        if "YES" in text.upper():
+            return GeminiOutcome(classified_as=0)
+
+        return GeminiOutcome(error=f"Unparseable classification response: {text[:120]!r}")
+
+    # ------------------------------------------------------------------
+    # Batch classification (concurrent)
+    # ------------------------------------------------------------------
+
+    def classify_images_batch(
+        self,
+        image_paths: list[Path],
+        prompt: str,
+        max_workers: int = 10,
+        on_result: "Callable[[int, int, Path, GeminiOutcome], None] | None" = None,
+    ) -> dict[Path, GeminiOutcome]:
+        """Send multiple images to Gemini for classification concurrently."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        outcomes: dict[Path, GeminiOutcome] = {}
+        total = len(image_paths)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_path = {
+                executor.submit(self.classify_image, path, prompt): path
+                for path in image_paths
+            }
+            for done, future in enumerate(as_completed(future_to_path), 1):
+                path = future_to_path[future]
+                try:
+                    outcome = future.result()
+                except Exception as exc:
+                    outcome = GeminiOutcome(error=str(exc))
+                outcomes[path] = outcome
+                if on_result:
+                    on_result(done, total, path, outcome)
+
+        return outcomes
 
     # ------------------------------------------------------------------
     # Batch labeling (concurrent)

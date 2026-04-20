@@ -22,7 +22,7 @@ from pathlib import Path
 from .config import PipelineConfig
 from .discovery import DiscoveredModel, discover_models, normalize_query
 from .gemini_client import GeminiClient
-from .local_inference import Detection, LocalModel
+from .local_inference import Classification, Detection, LocalModel
 from .yolo import YoloBox, normalize_box
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", 
 
 @dataclass
 class ImageResult:
-    """Detection result for a single image — returned to caller."""
+    """Detection or classification result for a single image — returned to caller."""
 
     image_path: Path
     boxes: list[YoloBox] = field(default_factory=list)
@@ -47,6 +47,15 @@ class ImageResult:
     img_height: int = 0
     # Raw YOLO detections (all confidences) for threshold re-filtering on restart
     raw_detections: list[Detection] = field(default_factory=list)
+    # Classification fields
+    class_id: int | None = None  # set when task_type="classification"
+    class_name: str = ""
+    class_confidence: float = 0.0
+    raw_classifications: list["Classification"] = field(default_factory=list)
+
+    @property
+    def is_classified(self) -> bool:
+        return self.class_id is not None
 
 
 # -----------------------------------------------------------------------
@@ -236,6 +245,7 @@ def run_pipeline(
             candidates = discover_models(
                 search_query, config.roboflow_api_key,
                 bypass_cache=config.refresh_model,
+                task_type=config.task_type,
             )
             if candidates:
                 _emit("discovery", message=f"Found {len(candidates)} candidate model(s)")
@@ -284,6 +294,7 @@ def run_pipeline(
     # --- Step 4a: per-image Roboflow inference (or flag for Gemini) ---
     pending_gemini: list[tuple[int, Path]] = []  # (result_index, image_path)
     progress = _ProgressDisplay(enabled=on_progress is None)
+    is_classification = config.task_type == "classification"
 
     try:
         for idx, image_path in enumerate(images, 1):
@@ -291,9 +302,14 @@ def run_pipeline(
             logger.debug("[%d/%d] %s", idx, stats.total, image_path.name)
 
             if local_model is not None and model_info is not None:
-                result, needs_gemini = _process_roboflow_phase(
-                    image_path, config, local_model, model_info, stats,
-                )
+                if is_classification:
+                    result, needs_gemini = _process_classification_phase(
+                        image_path, config, local_model, stats,
+                    )
+                else:
+                    result, needs_gemini = _process_roboflow_phase(
+                        image_path, config, local_model, model_info, stats,
+                    )
                 results.append(result)
                 if needs_gemini:
                     pending_gemini.append((len(results) - 1, image_path))
@@ -329,7 +345,7 @@ def run_pipeline(
             def _on_gemini_result(
                 done: int, total: int, path: Path, outcome: "GeminiOutcome",
             ) -> None:
-                if outcome.has_detections:
+                if outcome.has_detections or outcome.has_classification:
                     g_counts["labeled"] += 1
                 elif outcome.not_found:
                     g_counts["absent"] += 1
@@ -343,13 +359,23 @@ def run_pipeline(
                 _emit("gemini_batch", message="Labeling images with Gemini",
                       current=done, total=total)
 
-            outcomes = gemini.label_images_batch(
-                gemini_paths, config.prompt, on_result=_on_gemini_result,
-            )
+            if is_classification:
+                outcomes = gemini.classify_images_batch(
+                    gemini_paths, config.prompt, on_result=_on_gemini_result,
+                )
+            else:
+                outcomes = gemini.label_images_batch(
+                    gemini_paths, config.prompt, on_result=_on_gemini_result,
+                )
 
             for result_idx, image_path in pending_gemini:
                 outcome = outcomes[image_path]
-                results[result_idx] = _apply_gemini_outcome(image_path, outcome, stats)
+                if is_classification:
+                    results[result_idx] = _apply_gemini_classification_outcome(
+                        image_path, outcome, stats,
+                    )
+                else:
+                    results[result_idx] = _apply_gemini_outcome(image_path, outcome, stats)
 
             _emit("gemini_batch", message=f"Gemini done: {g_counts['labeled']} labeled, {g_counts['absent']} absent, {g_counts['err']} errors")
 
@@ -429,6 +455,66 @@ def _process_roboflow_phase(
 
 
 # -----------------------------------------------------------------------
+# Classification phase (per-image)
+# -----------------------------------------------------------------------
+
+def _process_classification_phase(
+    image_path: Path,
+    config: PipelineConfig,
+    model: LocalModel,
+    stats: BatchStats,
+) -> tuple[ImageResult, bool]:
+    """Roboflow local classification inference → threshold check.
+
+    Returns (result, needs_gemini).
+    """
+    try:
+        classifications = model.predict_classification(image_path)
+    except RuntimeError as exc:
+        logger.debug("  Classification error: %s — skipping", exc)
+        stats.skipped_error += 1
+        return ImageResult(image_path=image_path, error=str(exc)), False
+
+    if not classifications:
+        logger.debug("  -> No classification predictions — deferring to Gemini")
+        return ImageResult(image_path=image_path, raw_classifications=classifications), True
+
+    top = classifications[0]
+    logger.debug(
+        "  Classification: %s (%.2f) — threshold %.2f",
+        top.class_name, top.confidence, config.conf_threshold,
+    )
+
+    if top.confidence >= config.conf_threshold:
+        stats.labeled += 1
+        stats.roboflow_labeled += 1
+        return ImageResult(
+            image_path=image_path, source="roboflow",
+            class_id=top.class_id, class_name=top.class_name,
+            class_confidence=top.confidence,
+            raw_classifications=classifications,
+        ), False
+
+    # Uncertain band — defer to Gemini
+    gemini_floor = max(0.0, config.conf_threshold - 0.3)
+    if top.confidence >= gemini_floor:
+        logger.debug("  -> Uncertain (%.2f >= %.2f) — deferring to Gemini", top.confidence, gemini_floor)
+        return ImageResult(
+            image_path=image_path,
+            raw_classifications=classifications,
+        ), True
+
+    # Below floor — delete
+    logger.debug("  -> Below floor %.2f — deleting", gemini_floor)
+    image_path.unlink(missing_ok=True)
+    stats.deleted += 1
+    return ImageResult(
+        image_path=image_path, not_found=True,
+        raw_classifications=classifications,
+    ), False
+
+
+# -----------------------------------------------------------------------
 # Gemini outcome → ImageResult (applied after batch completes)
 # -----------------------------------------------------------------------
 
@@ -460,6 +546,38 @@ def _apply_gemini_outcome(
     return ImageResult(image_path=image_path)
 
 
+def _apply_gemini_classification_outcome(
+    image_path: Path,
+    outcome: "GeminiOutcome",
+    stats: BatchStats,
+) -> ImageResult:
+    """Convert a classification GeminiOutcome into an ImageResult."""
+    stats.gemini_calls += 1
+
+    if outcome.error:
+        logger.debug("  Gemini classification error (%s): %s", image_path.name, outcome.error)
+        stats.skipped_error += 1
+        return ImageResult(image_path=image_path, error=outcome.error)
+
+    if outcome.not_found:
+        image_path.unlink(missing_ok=True)
+        stats.deleted += 1
+        return ImageResult(image_path=image_path, not_found=True)
+
+    if outcome.has_classification:
+        stats.labeled += 1
+        stats.gemini_labeled += 1
+        return ImageResult(
+            image_path=image_path, source="gemini",
+            class_id=outcome.classified_as, class_name="",
+            class_confidence=1.0,
+        )
+
+    logger.debug("  Gemini empty classification — skipping (%s)", image_path.name)
+    stats.skipped_error += 1
+    return ImageResult(image_path=image_path)
+
+
 # -----------------------------------------------------------------------
 # Restart re-filtering (avoids full pipeline re-run)
 # -----------------------------------------------------------------------
@@ -470,8 +588,9 @@ def refilter_results(
     gemini_api_key: str = "",
     prompt: str = "",
     on_progress: Callable[[str, dict], None] | None = None,
+    task_type: str = "detection",
 ) -> tuple[BatchStats, list[ImageResult]]:
-    """Re-filter cached raw detections at a new threshold.
+    """Re-filter cached raw detections/classifications at a new threshold.
 
     Avoids re-running model discovery, download, and YOLO inference.
     Only calls Gemini for images that newly fall into the uncertain band.
@@ -489,6 +608,8 @@ def refilter_results(
     _emit("inference", message="Re-filtering at new threshold", current=0,
           total=len(previous_results))
 
+    is_classification = task_type == "classification"
+
     for idx, prev in enumerate(previous_results):
         stats.total += 1
         _emit("inference", message="Re-filtering", current=idx + 1,
@@ -497,7 +618,7 @@ def refilter_results(
         # Gemini-labeled or already not_found — keep as-is
         if prev.source == "gemini" or prev.not_found or prev.error:
             results.append(prev)
-            if prev.source == "gemini" and prev.boxes:
+            if prev.source == "gemini" and (prev.boxes or prev.is_classified):
                 stats.labeled += 1
                 stats.gemini_labeled += 1
             elif prev.not_found:
@@ -506,6 +627,41 @@ def refilter_results(
                 stats.skipped_error += 1
             continue
 
+        if is_classification:
+            # Re-filter raw classifications
+            if not prev.raw_classifications:
+                results.append(prev)
+                if prev.is_classified:
+                    stats.labeled += 1
+                continue
+
+            top = max(prev.raw_classifications, key=lambda c: c.confidence) if prev.raw_classifications else None
+            if top and top.confidence >= new_threshold:
+                stats.labeled += 1
+                stats.roboflow_labeled += 1
+                results.append(ImageResult(
+                    image_path=prev.image_path, source="roboflow",
+                    class_id=top.class_id, class_name=top.class_name,
+                    class_confidence=top.confidence,
+                    raw_classifications=prev.raw_classifications,
+                ))
+                continue
+            if top and top.confidence >= gemini_floor:
+                results.append(ImageResult(
+                    image_path=prev.image_path,
+                    raw_classifications=prev.raw_classifications,
+                ))
+                pending_gemini.append((len(results) - 1, prev.image_path))
+                continue
+            prev.image_path.unlink(missing_ok=True)
+            stats.deleted += 1
+            results.append(ImageResult(
+                image_path=prev.image_path, not_found=True,
+                raw_classifications=prev.raw_classifications,
+            ))
+            continue
+
+        # --- Detection refilter ---
         # No raw detections stored (e.g., Gemini-only mode) — keep as-is
         if not prev.raw_detections:
             results.append(prev)
@@ -564,11 +720,17 @@ def refilter_results(
             _emit("gemini_batch", message="Labeling images with Gemini",
                   current=done, total=total)
 
-        outcomes = gemini.label_images_batch(gemini_paths, prompt, on_result=_on_result)
+        if is_classification:
+            outcomes = gemini.classify_images_batch(gemini_paths, prompt, on_result=_on_result)
+        else:
+            outcomes = gemini.label_images_batch(gemini_paths, prompt, on_result=_on_result)
 
         for result_idx, image_path in pending_gemini:
             outcome = outcomes[image_path]
-            results[result_idx] = _apply_gemini_outcome(image_path, outcome, stats)
+            if is_classification:
+                results[result_idx] = _apply_gemini_classification_outcome(image_path, outcome, stats)
+            else:
+                results[result_idx] = _apply_gemini_outcome(image_path, outcome, stats)
 
     stats.log_summary()
     _emit("done", message="Pipeline complete", labeled=stats.labeled, total=stats.total)

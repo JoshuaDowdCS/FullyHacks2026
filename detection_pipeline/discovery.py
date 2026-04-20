@@ -78,6 +78,7 @@ _STOP_WORDS = frozenset({
     "my", "our", "your", "their", "me", "us", "him", "her",
     # Domain filler — words that appear in every prompt but carry no signal
     "detect", "detection", "detector", "detecting",
+    "classify", "classification", "classifier", "classifying",
     "find", "finding", "finder",
     "identify", "identifying", "identification",
     "recognize", "recognizing", "recognition",
@@ -282,9 +283,11 @@ def discover_models(
     min_relevance: float = 1.0,
     max_candidates: int = 5,
     bypass_cache: bool = False,
+    task_type: str = "detection",
 ) -> list[DiscoveredModel]:
-    """Discover the best object-detection models for *query*.
+    """Discover the best models for *query*.
 
+    *task_type* controls the hard filter: ``"detection"`` or ``"classification"``.
     Returns a ranked list (best first). Empty when nothing passes filters.
     """
     raw_results = search_models(query, api_key, bypass_cache=bypass_cache)
@@ -296,13 +299,18 @@ def discover_models(
     candidates: list[DiscoveredModel] = []
 
     for result in raw_results:
-        # --- hard filter: object detection only ---
+        # --- hard filter: must match requested task type ---
         model_type = (
             result.get("type") or result.get("project_type") or ""
         ).lower()
-        if "detection" not in model_type:
-            logger.debug("Skipping non-detection: %s (%s)", result.get("name"), model_type)
-            continue
+        if task_type == "classification":
+            if "classif" not in model_type:
+                logger.debug("Skipping non-classification: %s (%s)", result.get("name"), model_type)
+                continue
+        else:
+            if "detection" not in model_type:
+                logger.debug("Skipping non-detection: %s (%s)", result.get("name"), model_type)
+                continue
 
         # --- hard filter: must have a trained model ---
         if result.get("modelCount", 0) < 1:
@@ -334,7 +342,7 @@ def discover_models(
         )
 
     if not candidates:
-        logger.warning("No object-detection models passed hard filters")
+        logger.warning("No %s models passed hard filters", task_type)
         return []
 
     candidates.sort(key=lambda m: m.relevance_score, reverse=True)

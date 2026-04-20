@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import BaseModel
 
 CLASS_NAMES: dict[int, str] = {0: "object"}
@@ -21,6 +23,10 @@ class ImageInfo(BaseModel):
     width: int
     height: int
     labels: list[ImageLabel]
+    # Classification fields (populated when task_type="classification")
+    class_id: Optional[int] = None
+    class_name: Optional[str] = None
+    class_confidence: Optional[float] = None
 
 
 class ImagesResponse(BaseModel):
@@ -57,6 +63,7 @@ class UndoResponse(BaseModel):
 class RunRequest(BaseModel):
     prompt: str
     conf_threshold: float = 0.7
+    task_type: str = "detection"  # "detection" or "classification"
 
 
 class AcquireWebRequest(BaseModel):
@@ -68,5 +75,5 @@ class AcquireYouTubeRequest(BaseModel):
     prompt: str
     # Optional: if provided, that single video is downloaded + extracted.
     # If empty/None, we search YouTube for the top videos on the prompt.
-    youtube_url: str | None = None
+    youtube_url: Optional[str] = None
     max_videos: int = 5

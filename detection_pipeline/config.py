@@ -13,6 +13,7 @@ class PipelineConfig:
     labels_dir: Path = field(default_factory=lambda: Path("dataset/labels"))
     prompt: str = ""
     conf_threshold: float = 0.7
+    task_type: str = "detection"  # "detection" or "classification"
     refresh_model: bool = False
     keep_model_cache: bool = False
     expand_query_with_gemini: bool = False

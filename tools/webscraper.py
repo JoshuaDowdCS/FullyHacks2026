@@ -38,6 +38,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -473,6 +474,7 @@ def classify_and_prune(
     review_margin: float = 0.02,
     scene_distractors: list[str] | None = None,
     extra_photo_prompts: list[str] | None = None,
+    on_progress: "Callable[[str, dict], None] | None" = None,
 ) -> tuple[int, int, int]:
     """Score each image's CLIP similarity to photo/nonphoto/distractor prompts.
     margin = best_photo_score - best_reject_score.
@@ -534,11 +536,6 @@ def classify_and_prune(
     kept = rejected = maybe_keep = maybe_remove = 0
     print(f"Scoring {total} images in batches of {batch_size} (review margin ±{review_margin:.3f})...")
 
-    def _review_name(margin: float, name: str) -> str:
-        # Prefix with abs(margin) so files sort from most-confident to least
-        # within each review bucket. Sign is implied by the bucket.
-        return f"m{abs(margin):.4f}_{name}"
-
     for start in range(0, total, batch_size):
         chunk = files[start:start + batch_size]
         tensors = []
@@ -560,6 +557,9 @@ def classify_and_prune(
             feats = feats / feats.norm(dim=-1, keepdim=True)
             sims = (feats @ text_feats.T).cpu()
         for path, row in zip(valid, sims):
+            if not path.exists():
+                rejected += 1
+                continue
             photo_score = row[:n_photo].max().item()
             nonphoto_score = row[n_photo:n_photo + n_nonphoto].max().item()
             distractor_score = row[n_photo + n_nonphoto:].max().item()
@@ -568,22 +568,24 @@ def classify_and_prune(
             if margin >= review_margin:
                 kept += 1
             elif margin <= -review_margin:
-                # Don't permanently delete — CLIP false-negatives are the
-                # single biggest risk in this pipeline. Move to a review
-                # bucket so a downstream filter (or the user) can rescue.
-                path.rename(rejected_dir / _review_name(margin, path.name))
+                shutil.move(str(path), str(rejected_dir / path.name))
                 rejected += 1
             elif margin >= 0:
-                path.rename(maybe_keep_dir / _review_name(margin, path.name))
+                shutil.move(str(path), str(maybe_keep_dir / path.name))
                 maybe_keep += 1
             else:
-                path.rename(maybe_remove_dir / _review_name(margin, path.name))
+                shutil.move(str(path), str(maybe_remove_dir / path.name))
                 maybe_remove += 1
         done = min(start + batch_size, total)
         print(
             f"  {done}/{total} (kept={kept} maybe_keep={maybe_keep} "
             f"maybe_remove={maybe_remove} rejected={rejected})"
         )
+        if on_progress:
+            on_progress("filtering", {
+                "message": f"CLIP: {done}/{total} scored (kept {kept}, rejected {rejected})",
+                "current": done, "total": total,
+            })
     uncertain = maybe_keep + maybe_remove
     return kept, rejected, uncertain
 
@@ -593,6 +595,7 @@ def require_object_detection(
     object_query: str,
     confidence: float = 0.15,
     edge_fraction: float = 0.005,
+    on_progress: "Callable[[str, dict], None] | None" = None,
 ) -> tuple[int, int, int]:
     """Strict pass: use OWL-ViT (zero-shot open-vocabulary detector) to
     require a fully-in-frame bounding box for `object_query`.
@@ -648,13 +651,18 @@ def require_object_detection(
         if whole:
             kept += 1
         elif qualifying:
-            path.rename(cropped_dir / path.name)
+            shutil.move(str(path), str(cropped_dir / path.name))
             cropped += 1
         else:
-            path.rename(no_obj_dir / path.name)
+            shutil.move(str(path), str(no_obj_dir / path.name))
             no_obj += 1
         if i % 50 == 0 or i == total:
             print(f"  {i}/{total} (kept={kept} cropped={cropped} no_object={no_obj})")
+        if on_progress:
+            on_progress("filtering", {
+                "message": f"OWL-ViT: {i}/{total} (kept {kept}, no object {no_obj})",
+                "current": i, "total": total,
+            })
     return kept, cropped, no_obj
 
 
@@ -666,6 +674,7 @@ def require_yolo_detection(
     edge_fraction: float = 0.005,
     model_name: str = "yolov8s.pt",
     batch_size: int = 32,
+    on_progress: "Callable[[str, dict], None] | None" = None,
 ) -> tuple[int, int, int]:
     """Cheap, local first-pass detector using YOLO (COCO classes).
       - max-confidence target box >= confident_threshold AND not edge-touching
@@ -745,15 +754,20 @@ def require_yolo_detection(
             if whole and max(c for _, c in whole) >= confident_threshold:
                 kept += 1
             elif target_boxes and max(c for _, c in target_boxes) >= uncertain_threshold:
-                path.rename(uncertain_dir / path.name)
+                shutil.move(str(path), str(uncertain_dir / path.name))
                 uncertain += 1
             else:
-                path.rename(no_obj_dir / path.name)
+                shutil.move(str(path), str(no_obj_dir / path.name))
                 no_obj += 1
 
         processed += len(chunk)
         if processed % 100 < batch_size or processed == total:
             print(f"  {processed}/{total} (kept={kept} uncertain={uncertain} no_object={no_obj})")
+        if on_progress:
+            on_progress("filtering", {
+                "message": f"YOLO: {processed}/{total} (kept {kept}, uncertain {uncertain})",
+                "current": processed, "total": total,
+            })
     return kept, uncertain, no_obj
 
 
@@ -763,6 +777,7 @@ def vlm_review(
     model: str = "gemini-2.5-flash",
     source_dir: Path | None = None,
     concurrency: int = 10,
+    on_progress: "Callable[[str, dict], None] | None" = None,
 ) -> tuple[int, int, int]:
     """Use Gemini's vision model as a reviewer, in parallel.
       - source_dir=None: scan out_dir's top level; yes stays in place,
@@ -862,19 +877,26 @@ def vlm_review(
             verdict = fut.result()
             with lock:
                 processed += 1
-                if verdict == "yes":
+                if not path.exists():
+                    uncertain += 1
+                elif verdict == "yes":
                     if yes_dir is not None:
-                        path.rename(yes_dir / path.name)
+                        shutil.move(str(path), str(yes_dir / path.name))
                     kept += 1
                 elif verdict == "no":
-                    path.rename(rejected_dir / path.name)
+                    shutil.move(str(path), str(rejected_dir / path.name))
                     rejected += 1
                 else:
-                    path.rename(uncertain_dir / path.name)
+                    shutil.move(str(path), str(uncertain_dir / path.name))
                     uncertain += 1
                 if processed % 25 == 0 or processed == total:
                     tag = f" last={verdict}" if verdict.startswith("err:") else ""
                     print(f"  {processed}/{total} (kept={kept} rejected={rejected} uncertain={uncertain}){tag}")
+                if on_progress:
+                    on_progress("filtering", {
+                        "message": f"VLM: {processed}/{total} (kept {kept}, rejected {rejected})",
+                        "current": processed, "total": total,
+                    })
     return kept, rejected, uncertain
 
 
@@ -886,7 +908,7 @@ def finalize_to_keep(out_dir: Path) -> int:
     moved = 0
     for p in sorted(out_dir.iterdir()):
         if p.is_file() and not p.name.startswith("."):
-            p.rename(keep_dir / p.name)
+            shutil.move(str(p), str(keep_dir / p.name))
             moved += 1
     return moved
 
@@ -1101,6 +1123,7 @@ def crawl_jobs(
     done_path: Path,
     workers: int,
     downloader_threads: int,
+    on_progress: "Callable[[str, dict], None] | None" = None,
 ) -> None:
     """Run (engine, query) pairs in parallel, persisting completion so the
     script resumes on rerun."""
@@ -1141,6 +1164,11 @@ def crawl_jobs(
                 done.add(f"{engine}\t{query}")
                 _persist()
             print(f"  [{completed}/{total}] ok    {engine} {query!r}")
+            if on_progress:
+                on_progress("crawling", {
+                    "message": f"Job {completed}/{total}: {engine} {query!r}",
+                    "current": completed, "total": total,
+                })
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -1216,7 +1244,7 @@ def run_scraper(
             f"(~{per_query}/query × {n_jobs} = {per_query * n_jobs} attempts; "
             f"target {count} verified)..."
         ))
-        crawl_jobs(out_dir, icrawler_engines, queries, per_query, out_dir / ".done.txt", workers=4, downloader_threads=4)
+        crawl_jobs(out_dir, icrawler_engines, queries, per_query, out_dir / ".done.txt", workers=4, downloader_threads=4, on_progress=on_progress)
 
     # Dedup
     raw = sum(1 for p in out_dir.iterdir() if p.is_file() and not p.name.startswith("."))
@@ -1238,6 +1266,7 @@ def run_scraper(
     _emit("filtering", message="CLIP filtering...")
     kept, rejected, uncertain = classify_and_prune(
         out_dir, query, scene_distractors=spec_scene, extra_photo_prompts=spec_photo,
+        on_progress=on_progress,
     )
     _emit("filtering", message=f"CLIP: kept {kept}, rejected {rejected}, uncertain {uncertain}.")
 
@@ -1250,6 +1279,7 @@ def run_scraper(
             try:
                 strict_kept, cropped, no_obj = require_object_detection(
                     out_dir, obj_q, confidence=0.15, edge_fraction=0.005,
+                    on_progress=on_progress,
                 )
                 dst_u = out_dir / "review" / "yolo_uncertain"
                 dst_n = out_dir / "review" / "yolo_no_object"
@@ -1262,7 +1292,7 @@ def run_scraper(
                     if src.is_dir():
                         for p in src.iterdir():
                             if p.is_file() and not p.name.startswith("."):
-                                p.rename(dst / p.name)
+                                shutil.move(str(p), str(dst / p.name))
                 yolo_auto_fellback = True
             except Exception:
                 pass
@@ -1273,6 +1303,7 @@ def run_scraper(
                 confident_threshold=0.45, uncertain_threshold=0.05,
                 edge_fraction=0.005,
                 model_name=str(_PROJECT_ROOT / "models" / "yolov8m.pt"),
+                on_progress=on_progress,
             )
 
     # VLM review
@@ -1284,10 +1315,10 @@ def run_scraper(
                 p for p in unc_dir.iterdir() if p.is_file() and not p.name.startswith(".")
             ):
                 _emit("filtering", message="VLM cascade on uncertain images...")
-                vlm_review(out_dir, vlm_topic, source_dir=unc_dir)
+                vlm_review(out_dir, vlm_topic, source_dir=unc_dir, on_progress=on_progress)
         else:
             _emit("filtering", message="VLM review...")
-            vlm_review(out_dir, vlm_topic)
+            vlm_review(out_dir, vlm_topic, on_progress=on_progress)
 
     # Finalize
     moved = finalize_to_keep(out_dir)
@@ -1558,7 +1589,7 @@ def main() -> int:
             if src.is_dir():
                 for p in src.iterdir():
                     if p.is_file() and not p.name.startswith("."):
-                        p.rename(dst / p.name)
+                        shutil.move(str(p), str(dst / p.name))
         print(
             f"OWL-ViT (as yolo fallback) done. Kept {strict_kept} fully-framed; "
             f"{cropped} -> review/yolo_uncertain/, {no_obj} -> review/yolo_no_object/."

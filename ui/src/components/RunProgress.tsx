@@ -91,7 +91,7 @@ export default function RunProgress({ event, confThreshold }: RunProgressProps) 
 
   return (
     <motion.div
-      className="relative w-[520px] max-w-[90vw] rounded-2xl p-12"
+      className="relative w-[520px] max-w-[90vw] max-h-[85vh] flex flex-col rounded-2xl p-12"
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.4 }}
@@ -163,7 +163,7 @@ export default function RunProgress({ event, confThreshold }: RunProgressProps) 
       {/* Activity log */}
       {log.length > 0 && (
         <div
-          className="mt-6 max-h-[220px] overflow-y-auto activity-log"
+          className="mt-6 min-h-0 flex-1 overflow-y-auto activity-log"
           style={{
             background: "rgba(2,8,16,0.5)",
             border: "1px solid rgba(76,224,210,0.08)",

@@ -84,3 +84,10 @@ def write_label_file(path: Path, boxes: list[YoloBox]) -> None:
     with open(path, "w") as f:
         for box in boxes:
             f.write(box.to_line() + "\n")
+
+
+def write_classification_label(path: Path, class_id: int) -> None:
+    """Write a YOLO classification label file (single class_id)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write(f"{class_id}\n")

@@ -487,6 +487,7 @@ def run_yt_scraper(
         try:
             kept, cropped, no_obj = require_object_detection(
                 out_dir, obj_q, confidence=0.15, edge_fraction=0.005,
+                on_progress=on_progress,
             )
             dst_u = out_dir / "review" / "yolo_uncertain"
             dst_n = out_dir / "review" / "yolo_no_object"
@@ -510,6 +511,7 @@ def run_yt_scraper(
                 confident_threshold=0.45, uncertain_threshold=0.05,
                 edge_fraction=0.005,
                 model_name=str(_PROJECT_ROOT / "models" / "yolov8m.pt"),
+                on_progress=on_progress,
             )
         except Exception:
             pass
@@ -520,7 +522,7 @@ def run_yt_scraper(
         p for p in unc_dir.iterdir() if p.is_file() and not p.name.startswith(".")
     ):
         _emit("filtering", message="VLM cascade on uncertain frames...")
-        vlm_review(out_dir, vlm_object, source_dir=unc_dir, concurrency=20)
+        vlm_review(out_dir, vlm_object, source_dir=unc_dir, concurrency=20, on_progress=on_progress)
 
     # Finalize
     finalize_to_keep(out_dir)

@@ -19,6 +19,7 @@ def upload_to_roboflow(
     labels_dir: Path,
     api_key: str,
     project_name: str,
+    project_type: str = "object-detection",
 ) -> None:
     """Upload all labeled images to a Roboflow project.
 
@@ -31,7 +32,7 @@ def upload_to_roboflow(
     workspace = rf.workspace()
 
     # Get or create project
-    project = _get_or_create_project(workspace, project_name)
+    project = _get_or_create_project(workspace, project_name, project_type)
 
     # Find all images that have labels
     pairs = _find_labeled_pairs(images_dir, labels_dir)
@@ -81,7 +82,7 @@ def _upload_one(project, image_path: Path, label_path: Path) -> None:
     )
 
 
-def _get_or_create_project(workspace, project_name: str):
+def _get_or_create_project(workspace, project_name: str, project_type: str = "object-detection"):
     """Return existing project or create a new one."""
     try:
         project = workspace.project(project_name)
@@ -90,12 +91,12 @@ def _get_or_create_project(workspace, project_name: str):
     except Exception:
         pass
 
-    logger.info("Creating new Roboflow project: %s", project_name)
+    logger.info("Creating new Roboflow project: %s (type=%s)", project_name, project_type)
     project = workspace.create_project(
         project_name=project_name,
-        project_type="object-detection",
+        project_type=project_type,
         project_license="MIT",
-        annotation="basketball",
+        annotation=project_name,
     )
     return project
 

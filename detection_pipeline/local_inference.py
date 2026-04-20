@@ -39,6 +39,15 @@ class Detection:
     class_name: str = ""
 
 
+@dataclass
+class Classification:
+    """A single classification prediction from local inference."""
+
+    class_id: int
+    class_name: str
+    confidence: float
+
+
 class LocalModel:
     """Wrapper around the *inference* SDK for local object detection."""
 
@@ -113,6 +122,34 @@ class LocalModel:
         except Exception as exc:
             raise RuntimeError(f"Inference failed on {image_path.name}: {exc}") from exc
 
+    def predict_classification(self, image_path: Path) -> list[Classification]:
+        """Run classification inference on *image_path*.
+
+        Returns a list of Classification predictions sorted by confidence (highest first).
+        Raises ``RuntimeError`` on failure.
+        """
+        if self._model is None:
+            raise RuntimeError("Model not loaded — call load() first")
+
+        try:
+            import cv2  # type: ignore[import-untyped]
+
+            image = cv2.imread(str(image_path))
+            if image is None:
+                raise RuntimeError(f"Cannot read image: {image_path}")
+
+            results = self._model.infer(image)
+            predictions = self._extract_predictions(results)
+            classifications = [
+                c for p in predictions if (c := self._parse_classification(p))
+            ]
+            classifications.sort(key=lambda c: c.confidence, reverse=True)
+            return classifications
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Classification inference failed on {image_path.name}: {exc}") from exc
+
     # ------------------------------------------------------------------
     # Result parsing (handles multiple inference SDK response shapes)
     # ------------------------------------------------------------------
@@ -158,6 +195,24 @@ class LocalModel:
             )
         except (TypeError, ValueError, AttributeError) as exc:
             logger.debug("Unparseable prediction: %s", exc)
+            return None
+
+    @staticmethod
+    def _parse_classification(pred: object) -> Classification | None:
+        try:
+            if isinstance(pred, dict):
+                return Classification(
+                    class_id=int(pred.get("class_id", 0)),
+                    class_name=str(pred.get("class", pred.get("class_name", ""))),
+                    confidence=float(pred.get("confidence", 0)),
+                )
+            return Classification(
+                class_id=int(getattr(pred, "class_id", 0)),
+                class_name=str(getattr(pred, "class_name", getattr(pred, "class_", ""))),
+                confidence=float(getattr(pred, "confidence", 0)),
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.debug("Unparseable classification prediction: %s", exc)
             return None
 
     # ------------------------------------------------------------------

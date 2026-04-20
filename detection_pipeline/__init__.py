@@ -1,1 +1,1 @@
-"""Detection labeling pipeline — batch YOLO label generation."""
+"""Detection & classification labeling pipeline — batch YOLO label generation."""

@@ -20,7 +20,7 @@ from detection_pipeline.config import PipelineConfig
 from detection_pipeline.discovery import normalize_query
 from detection_pipeline.pipeline import IMAGE_EXTENSIONS, ImageResult, refilter_results, run_pipeline
 from detection_pipeline.upload import upload_to_roboflow
-from detection_pipeline.yolo import YoloBox, write_label_file
+from detection_pipeline.yolo import YoloBox, write_classification_label, write_label_file
 
 from . import models
 from .models import (
@@ -59,6 +59,7 @@ _prompt: str = os.environ.get("PIPELINE_PROMPT", "basketball")
 _images_dir = Path(os.environ.get("IMAGES_DIR", str(_project_root / "dataset" / "images")))
 _labels_dir = Path(os.environ.get("LABELS_DIR", str(_project_root / "dataset" / "labels")))
 _conf_threshold: float = float(os.environ.get("CONF_THRESHOLD", "0.7"))
+_task_type: str = "detection"
 
 _trash_dir = _images_dir.parent / ".trash"
 
@@ -160,6 +161,9 @@ def _build_image_info(result: ImageResult) -> ImageInfo:
         width=w,
         height=h,
         labels=labels,
+        class_id=result.class_id,
+        class_name=result.class_name or None,
+        class_confidence=result.class_confidence if result.is_classified else None,
     )
 
 
@@ -179,7 +183,7 @@ def list_images():
     _keep_counter = 0  # reset on reload
     labeled = [
         r for r in _pipeline_results.values()
-        if r.boxes and not r.not_found and r.image_path.exists()
+        if (r.boxes or r.is_classified) and not r.not_found and r.image_path.exists()
     ]
     # Also prune the dict so subsequent keep/discard don't reference ghosts.
     stale = [
@@ -213,7 +217,7 @@ def serve_image(filename: str):
 def get_stats():
     """Return current batch stats."""
     total = len(_pipeline_results)
-    labeled = sum(1 for r in _pipeline_results.values() if r.boxes and not r.not_found)
+    labeled = sum(1 for r in _pipeline_results.values() if (r.boxes or r.is_classified) and not r.not_found)
     return StatsResponse(
         total=total,
         labeled=labeled,
@@ -345,6 +349,7 @@ def restart_pipeline():
             new_threshold=_conf_threshold,
             gemini_api_key=_config.gemini_api_key,
             prompt=_prompt,
+            task_type=_task_type,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -354,11 +359,16 @@ def restart_pipeline():
     # Write updated labels
     _labels_dir.mkdir(parents=True, exist_ok=True)
     for r in results:
-        if r.boxes and not r.not_found:
-            write_label_file(_labels_dir / f"{r.image_path.stem}.txt", r.boxes)
+        if r.not_found:
+            continue
+        label_path = _labels_dir / f"{r.image_path.stem}.txt"
+        if r.boxes:
+            write_label_file(label_path, r.boxes)
+        elif r.is_classified:
+            write_classification_label(label_path, r.class_id)
 
     total = len(_pipeline_results)
-    labeled = sum(1 for r in _pipeline_results.values() if r.boxes and not r.not_found)
+    labeled = sum(1 for r in _pipeline_results.values() if (r.boxes or r.is_classified) and not r.not_found)
 
     return RestartResponse(
         stats=StatsResponse(
@@ -373,7 +383,7 @@ def restart_pipeline():
 @app.post("/api/run")
 async def run(body: RunRequest):
     """Launch the pipeline and stream progress as SSE events."""
-    global _pipeline_results, _conf_threshold, _prompt, _config, _keep_counter, _pipeline_running
+    global _pipeline_results, _conf_threshold, _prompt, _config, _keep_counter, _pipeline_running, _task_type
 
     if _pipeline_running:
         raise HTTPException(
@@ -386,6 +396,7 @@ async def run(body: RunRequest):
     _pipeline_results = {}
     _conf_threshold = body.conf_threshold
     _prompt = body.prompt
+    _task_type = body.task_type
     _keep_counter = 0
     models.CLASS_NAMES = {0: body.prompt}
     _undo_stack.clear()
@@ -397,6 +408,7 @@ async def run(body: RunRequest):
         labels_dir=_labels_dir,
         prompt=body.prompt,
         conf_threshold=body.conf_threshold,
+        task_type=body.task_type,
         keep_model_cache=True,
         expand_query_with_gemini=bool(_config.gemini_configured),
     )
@@ -417,8 +429,13 @@ async def run(body: RunRequest):
             # Write label files to disk immediately
             _labels_dir.mkdir(parents=True, exist_ok=True)
             for r in results:
-                if r.boxes and not r.not_found:
-                    write_label_file(_labels_dir / f"{r.image_path.stem}.txt", r.boxes)
+                if r.not_found:
+                    continue
+                label_path = _labels_dir / f"{r.image_path.stem}.txt"
+                if r.boxes:
+                    write_label_file(label_path, r.boxes)
+                elif r.is_classified:
+                    write_classification_label(label_path, r.class_id)
             # Update global so GET /api/images sees the results
             globals()["_pipeline_results"] = {r.image_path.name: r for r in results}
         except Exception as exc:
@@ -457,23 +474,29 @@ def upload():
         raise HTTPException(status_code=400, detail="ROBOFLOW_API_KEY not configured")
 
     slug = normalize_query(_prompt).replace(" ", "-")
-    project_name = f"{slug}-detection" if slug else "detection-pipeline"
+    suffix = "classification" if _task_type == "classification" else "detection"
+    project_name = f"{slug}-{suffix}" if slug else f"{suffix}-pipeline"
 
     # Labels are already written to disk by the run() endpoint;
     # just count how many we have.
     labeled_count = sum(
-        1 for r in _pipeline_results.values() if r.boxes and not r.not_found
+        1 for r in _pipeline_results.values() if (r.boxes or r.is_classified) and not r.not_found
     )
 
     if labeled_count == 0:
         raise HTTPException(status_code=400, detail="No labeled images to upload")
 
+    rf_project_type = (
+        "single-label-classification" if _task_type == "classification"
+        else "object-detection"
+    )
     try:
         upload_to_roboflow(
             images_dir=_images_dir,
             labels_dir=_labels_dir,
             api_key=_config.roboflow_api_key,
             project_name=project_name,
+            project_type=rf_project_type,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
