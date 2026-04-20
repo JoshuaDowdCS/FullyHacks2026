@@ -169,6 +169,7 @@ export default function RunProgress({ event, confThreshold }: RunProgressProps) 
             border: "1px solid rgba(76,224,210,0.08)",
             borderRadius: "8px",
             padding: "8px 12px",
+            maxHeight: "50vh",
           }}
         >
           {log.map((entry) => (
